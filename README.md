@@ -15,7 +15,9 @@ The tx by which the swap service will fund the smart contract is called tx0. The
 
 ```
 [
+    // tapleaf 1 aka "the first branch"
     [ user_pubkey, OP_CHECKSIGVERIFY, server_pubkey, OP_CHECKSIG ],
+    // tapleaf 2 aka "the second branch"
     [ OP_SHA256, payment_hash, OP_EQUALVERIFY, user_pubkey, OP_CHECKSIGVERIFY, server_pubkey, OP_CHECKSIG ],
 ]
 ```
