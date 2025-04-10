@@ -3,13 +3,12 @@ Submarine swaps that are faster, cheaper, and easier than HTLCs
 
 # Introduction
 
-The name Papa Swap comes from Papa Class, a group of Cold War submarines that included the world’s fastest declassified submarine – the Soviet K-222.
-
 “Papa Swapa” is a swap server which implements Papa Swaps. Papa Swaps are an "upgrade" over regular submarine swaps with the following benefits:
 
 (1) Papa swaps only involve 1 transaction, whereas regular submarine swaps require 2 transactions  
-(2) Papa swaps slash the cost of submarine swaps in half due to needing half the number of transactions  
-(3) Papa swaps slash the cost even further by using taproot, where scripts of this kind are more efficient than they are in segwit v0
+(2) Papa swaps are twice as fast as submarine swaps due to needing half the number of transactions
+(3) Papa swaps slash the cost of submarine swaps in half due to needing half the number of transactions  
+(4) Papa swaps slash the cost even further by using taproot, where scripts of this kind are more efficient than they are in segwit v0
 
 # How it works
 
@@ -61,3 +60,7 @@ But in the happy path, the preimage *does* match. And in this case the user can 
 In the "How it works" section I mentioned that the server must do several things, which I gave numbers to, including #2, which was "[fund] a wallet with base layer sats." Assuming the money in that wallet was not entirely spent in tx0, tx0 will create a change output in the swap service’s wallet, and the swap service can use this change output as a second input to tx1. If the swap service does this, then the user can discard tx4 as soon as that change output is spent, e.g. in another swap, because once that happens, tx1 is invalid and the user knows they will never need tx4 – the user alone controls the funds in the swap address, and the swap server cannot create a race condition by broadcasting tx1, because it has become invalid.
 
 However, this improvement has a small downside: the server must not spend that change output e.g. in another swap until the swap that created the change output is complete. If they do, their own tx1 will be invalid, so the user could hold their money hostage by not paying the swap invoice, whereupon the swap server would have no way to get their money back, since tx1 has been invalidated. I do not think this downside is very big because it's pretty easy to just mark a change output as unspendable for a few blocks. It's unlikely that the server would have no other money to continue performing swaps for other people.
+
+# Why are these submarine swaps called Papa Swaps?
+
+The name Papa Swap comes from Papa Class, a group of Cold War submarines that included the world’s fastest declassified submarine – the Soviet K-222. As those are the fastest submarines, these are the fastest submarine swaps.
