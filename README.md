@@ -37,6 +37,15 @@ Recall that tx0 is the name of the transaction by which the server plans to even
 
 The server must use the second branch to sign two txs called tx3 and tx4. Both allow the user to use the second branch to withdraw the money from the smart contract without waiting if they learn the preimage, but tx3 spends the utxo created by tx0 and tx4 spends the utxo created by tx1. The server shares the signatures for tx3 and tx4 with the user.
 
+# Protocol flow in ordered, summarized format
+
+1. User requests a submarine swap (lightning -> base layer)
+2. Server prepares the smart contract and a swap invoice, and sends the user the data described in the second paragraph of "How it works"
+3. User validates the data, signs tx1 and tx2, and shares their signatures with the server
+4. Server validates the signatures, signs tx3 and tx4, funds the smart contract, and shares their signatures with the user
+5. User validates the signatures, verifies that the smart contract contains the exact amount needed for the swap (and that the funding utxo is the one they expected), and pays the lightning invoice
+6. Once the user receives the preimage to the lightning invoice, the protocol is complete: the swap has occurred even though only 1 base layer transaction has happened; the user alone has full control of the money in the smart contract, whereas the swap server alone has full control of the money paid to him via lightning
+
 # Why this works
 
 Once the user validates the server’s signatures for tx3 and tx4, the user knows they will be able to withdraw the money from the smart contract via its second branch if they learn the preimage to the swap invoice. They know this because it is a direct result of tx0 and tx4: tx0 lets the user withdraw the money from the smart contract if the user provides the preimage and a signature from themselves and the server. But they already have the server's signature, and the user can create their own signature, so all they need is the preimage. So the user does not need to trust the swap service when they pay the swap invoice: as soon as they pay it, they get the preimage, and now they own the money.
