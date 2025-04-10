@@ -86,4 +86,4 @@ However, this improvement has a small downside: the server must not spend that c
 
 # Why are these submarine swaps called Papa Swaps?
 
-The name Papa Swap comes from Papa Class, a group of Cold War submarines that included the world’s fastest declassified submarine – the Soviet K-222. As those are the fastest submarines, these are the fastest submarine swaps.
+The name Papa Swap comes from Papa Class, a group of Cold War submarines that included the world’s fastest declassified submarine – the Soviet K-222. As those are the fastest submarines, these are the fastest submarine swaps. Well, actually, now that I think about it, they are the *second* fastest. There is another type of swap used in some lightning wallets, called a "splice in," and it is sometimes safe to use a channel funded via a splice even before the splice transaction confirms. (The occasions when this is safe are probably outlined and explained in other documents about how splicing works, but I couldn't find any within 5 minutes of doing a quick google search; you try it and maybe you'll have better luck.) So splices are, at least sometimes, faster than papa swaps.
