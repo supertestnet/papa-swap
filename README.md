@@ -12,7 +12,7 @@ Submarine swaps that are faster, cheaper, and easier than HTLCs
 
 # How it works
 
-A papa swapa server does the following things: it (1) sets a swap fee (2) funds a wallet with base layer sats (3) uses an NWC string as a funding source. It also listens for swap requests over nostr. When a swap request comes in, it checks that the user wants money equal to or less than the amount in #2. If so, it assesses the fee from #1 and generates a lightning invoice for that amount, which it presents to the user.
+A papa swapa server does the following things: it (1) sets a swap fee (2) funds a wallet with base layer sats (3) uses an NWC string as a funding source. (I suppose it could use *any* backend that is capable of receiving lightning payments, but I want to use NWC in my implementation because NWC is cool.) It also listens for swap requests over nostr. When a swap request comes in, it checks that the user wants money equal to or less than the amount in #2. If so, it assesses the fee from #1 and generates a lightning invoice for that amount, which it presents to the user.
 
 If/when the user pays that fee, the server (a) generates another lightning invoice for the amount of the swap (b) treats the preimage to the invoice's payment hash as a private key, and derives its corresponding public key (c) uses the payment hash to construct a smart contract to be described shortly (d) signs some txs, described shortly (e) validates some signatures from the user, described shortly (f) selects a utxo by which he will fund that smart contract on the base layer with the swap amount and (g) shows the user three things, namely: the lightning invoice from (a), the public key from (b), and the utxo data from (f), namely, that utxo's txid and vout.
 
