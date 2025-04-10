@@ -6,7 +6,7 @@ Submarine swaps that are faster, cheaper, and easier than HTLCs
 “Papa Swapa” is a swap server which implements Papa Swaps. Papa Swaps are an "upgrade" over regular submarine swaps with the following benefits:
 
 (1) Papa swaps only involve 1 transaction, whereas regular submarine swaps require 2 transactions  
-(2) Papa swaps are twice as fast as submarine swaps due to needing half the number of transactions
+(2) Papa swaps are twice as fast as submarine swaps due to needing half the number of transactions  
 (3) Papa swaps slash the cost of submarine swaps in half due to needing half the number of transactions  
 (4) Papa swaps slash the cost even further by using taproot, where scripts of this kind are more efficient than they are in segwit v0
 
