@@ -9,7 +9,7 @@ The name Papa Swap comes from Papa Class, a group of Cold War submarines that in
 
 If/when the user pays that fee, the server (a) generates another lightning invoice for the amount of the swap (b) uses its payment hash to construct a smart contract to be described shortly (c) signs some txs, described shortly (d) validates some signatures from the user, described shortly (e) funds that smart contract on the base layer with the swap amount and (f) shows the user several things, namely: the lightning invoice from (a), the public key derived from the payment preimage, and the txid + vout + amnt + addy of the utxo(s) by which they intend to fund the smart contract.
 
-The tx by which the swap service will fund the smart contract is called tx0. The user extracts the payment hash from the invoice, independently constructs the smart contract, and verifies that the amount in the smart contract is identical to the amount they want to swap. They ought to wait for that transaction to confirm. Then they pay the lightning invoice, knowing the money in the smart contract is theirs as soon as they do.
+The tx by which the swap service will fund the smart contract is called tx0. The user extracts the payment hash from the invoice from (a), independently constructs the smart contract from (b), and verifies that the amount in the smart contract is identical to the amount they want to swap. They ought to wait for that transaction to confirm. Then they pay the lightning invoice, knowing the money in the smart contract is theirs as soon as they do.
 
 # Smart contract
 
