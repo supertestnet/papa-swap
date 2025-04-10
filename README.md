@@ -68,7 +68,7 @@ The trust assumption at the heart of papa swap is equivalent to the one used in 
 
 # A subtle improvement
 
-Although nothing bad can happen to the user if he or she follows the above protocol, there is a way to improve the protocol even further: it is possible to make the user's withdrawal transaction cheaper. The idea here is this: in taproot, the key path costs less than the script path in terms of mining fees. So it would be great if the user did not have to use the script path, but could use the key path.
+Although nothing bad can happen to the user if he or she follows the above protocol, there is a way to improve the protocol even further: it is possible to give the user a *cheaper* way to spend the money in the smart contract. The idea here is this: in taproot, the key path costs less than the script path in terms of mining fees. So it would be great if the user did not have to use the script path, but could use the key path.
 
 For this reason, the user optimistically *hopes* the preimage given by the server in step 8 is *also* the private key to the public key which, when tweaked with the user’s pubkey, yields the key required for spending the money via the keypath. If it is, then the user can add their own privkey to the preimage to derive the keypath key, and then simply import that key to their wallet, without the need to withdraw from the swap address immediately.
 
