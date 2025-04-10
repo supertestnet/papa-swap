@@ -39,12 +39,14 @@ The server must use the second branch to sign two txs called tx3 and tx4. Both a
 
 # Protocol flow in ordered, summarized format
 
-1. User requests a submarine swap (lightning -> base layer)
-2. Server prepares the smart contract and a swap invoice, and sends the user the data described in the second paragraph of "How it works"
-3. User validates the data, signs tx1 and tx2, and shares their signatures with the server
-4. Server validates the signatures, signs tx3 and tx4, funds the smart contract, and shares their signatures with the user
-5. User validates the signatures, waits for the funding tx to confirm, verifies that the smart contract contains the exact amount needed for the swap (and that the funding utxo is the one they expected), and pays the lightning invoice
-6. Once the user receives the preimage to the lightning invoice, the protocol is complete: the swap has occurred even though only 1 base layer transaction has happened; the user alone has full control of the money in the smart contract, whereas the swap server alone has full control of the money paid to him via lightning
+1. User requests a submarine swap (lightning -> base layer) and tells the server the amount they want to swap for
+2. Server calculates a fee and gives a "fee invoice" to the user
+3. User pays the fee invoice
+4. Server prepares the swap "smart contract" and a swap invoice, and sends the user the data described in the second paragraph of "How it works"
+5. User validates the data, signs tx1 and tx2, and shares their signatures with the server
+6. Server validates the signatures, signs tx3 and tx4, funds the smart contract, and shares their signatures with the user
+7. User validates the signatures, waits for the funding tx to confirm, verifies that the smart contract contains the exact amount needed for the swap (and that the funding utxo is the one they expected), and pays the lightning invoice
+8. Once the user receives the preimage to the lightning invoice, the protocol is complete: the swap has occurred even though only 1 base layer transaction has happened; the user alone has full control of the money in the smart contract, whereas the swap server alone has full control of the money paid to him via lightning
 
 # Why this works
 
@@ -60,7 +62,9 @@ I have said that the user has full, unilateral control of the money in the smart
 
 But having reached this point, you might be wondering, "What about tx2? Tx2 makes a *second* race condition possible. Namely, it lets the server sweep the money from the smart contract after a 2 week period. So, even if the server deposits the money into the smart contract, and even if the user then pays the swap invoice, the user does not have full, unilateral control yet; they *have to* sweep the money from the smart contract before 2 weeks go by, otherwise there's a *second* race condition: either the user or the server can sweep the money, and which one "wins" is solely determined by miners (and hence, effectively, it goes to whoever pays the highest fee). So you have not *really* eliminated the need for 2 transactions; you've only delayed the second transaction."
 
-This is false and I'll tell you why: tx2 cannot be broadcast by the server unless they broadcast tx1 first. Tx2 spends the output created by tx1, so if tx1 hasn't been broadcasted yet, tx2 can't be broadcasted either. Consequently, there's never a "second" race condition: under the happy path, the swap server never broadcasts tx1, so the 2 week countdown never starts, and the race condition never happens; and under the sad path, the server *does* broadcast tx1, but the user has 2 weeks to correct that by broadcasting tx4, so there's no a race condition in the sad path either. The trust assumption here is equivalent to the one we use in the lightning network: the user does not have to trust their counterparty unless they go offline for a 2 week period and are not using a watchtower of some kind. (I think papa swaps are best suited for use in lightning wallets, which already have this trust assumption *and* the ability to pay lightning invoices, which are used in steps 2 and 6 of the protocol.)
+This is false and I'll tell you why: tx2 cannot be broadcast by the server unless they broadcast tx1 first. Tx2 spends the output created by tx1, so if tx1 hasn't been broadcasted yet, tx2 can't be broadcasted either. Consequently, there's never a "second" race condition: under the happy path, the swap server never broadcasts tx1, so the 2 week countdown never starts, and the race condition never happens; and under the sad path, the server *does* broadcast tx1, but the user has 2 weeks to correct that by broadcasting tx4, so there's no a race condition in the sad path either.
+
+The trust assumption at the heart of papa swap is equivalent to the one used in the lightning network: the user does not have to trust their counterparty unless they go offline for a 2 week period and are not using a watchtower of some kind. Since the user has a lengthy (2 week) opportunity to recover their funds if the server tries to cheat, and during that time there are no race conditions, I think this protocol qualifies as giving the user "full, unilateral control" over their money in the same way the lightning network does. However, since there is a 2 week period involved, I also think papa swaps are best suited for use in self-custodial lightning wallets: those have a similar "check in" period *and* they have the ability to pay lightning invoices, which are required in steps 3 and 7 of the protocol.
 
 # A subtle improvement
 
