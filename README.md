@@ -5,7 +5,15 @@ Submarine swaps that are faster, cheaper, and easier than HTLCs
 
 The name Papa Swap comes from Papa Class, a group of Cold War submarines that included the world’s fastest declassified submarine – the Soviet K-222.
 
-“Papa Swapa” is a swap server which implements Papa Swaps. Namely, it (1) sets a swap fee (2) funds a wallet with base layer sats (3) uses an NWC string as a funding source. It also listens for swap requests over nostr. When a swap request comes in, it checks that the user wants money equal to or less than the amount in #2. If so, it assesses the fee from #1 and generates a lightning invoice for that amount, which it presents to the user.
+“Papa Swapa” is a swap server which implements Papa Swaps. Papa Swaps are an "upgrade" over regular submarine swaps with the following benefits:
+
+(1) Papa swaps only involve 1 transaction, whereas regular submarine swaps require 2 transactions  
+(2) Papa swaps slash the cost of submarine swaps in half due to needing half the number of transactions  
+(3) Papa swaps slash the cost even further by using taproot, where scripts of this kind are more efficient than they are in segwit v0
+
+# How it works
+
+A papa swapa server does the following things: it (1) sets a swap fee (2) funds a wallet with base layer sats (3) uses an NWC string as a funding source. It also listens for swap requests over nostr. When a swap request comes in, it checks that the user wants money equal to or less than the amount in #2. If so, it assesses the fee from #1 and generates a lightning invoice for that amount, which it presents to the user.
 
 If/when the user pays that fee, the server (a) generates another lightning invoice for the amount of the swap (b) uses its payment hash to construct a smart contract to be described shortly (c) signs some txs, described shortly (d) validates some signatures from the user, described shortly (e) funds that smart contract on the base layer with the swap amount and (f) shows the user several things, namely: the lightning invoice from (a), the public key derived from the payment preimage, and the txid + vout + amnt + addy of the utxo(s) by which they intend to fund the smart contract.
 
