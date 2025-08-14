@@ -180,18 +180,24 @@
                     //TODO: set up listener on nostr
                     return titanlib.convertPubkeyAndRelaysToNprofile( "nprofile", nostr_pubkey, relays );
                 },
+                isValidAddress: address => {
+                    try {
+                        return !!tapscript.Address.decode( address ).script;
+                    } catch( e ) {return;}
+                    return;
+                },
                 getVin: ( txid, vout, amnt, addy, sequence = 0xffffffff - 2 ) => ({
                     txid,
                     vout,
                     sequence,
                     prevout: {
                         value: amnt,
-                        scriptPubKey: tapscript.Address.toScriptPubKey( addy ),
+                        scriptPubKey: titanlib.isValidAddress( addy ) ? tapscript.Address.toScriptPubKey( addy ) : addy,
                     },
                 }),
                 getVout: ( amnt, addy ) => ({
                     value: amnt,
-                    scriptPubKey: tapscript.Address.toScriptPubKey( addy ),
+                    scriptPubKey: titanlib.isValidAddress( addy ) ? tapscript.Address.toScriptPubKey( addy ) : addy,
                 }),
                 getSwapScript: ( state_id, pmthash ) => {
                     var state = titanlib.state[ state_id ];
@@ -209,6 +215,7 @@
                     var alices_pub = state.alices_pub;
                     var bobs_pub = state.bobs_pub;
                     var make_connector = !state.connector_txid;
+                    var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], "regtest" );
 
                     //enter what amount you want to receive
                     var amount = Number( prompt( `enter the amount of sats you want to receive` ) );
@@ -244,9 +251,8 @@
 
                     //get the transactions that need to be signed
                     var txs = titanlib.getTxs( state_id, amount, pmthash, utxos, make_connector, txfee );
-                    var { tx0, tx1, tx2, tx3, tx4, swap_addy, swap_tree, swap_cblock } = txs;
+                    var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
                     if ( make_connector ) {
-                        var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], "regtest" );
                         var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
                         var connector_tx = tapscript.Tx.create({
                             version: 3,
@@ -255,6 +261,7 @@
                             ],
                             vout: [
                                 titanlib.getVout( 330, alices_address ),
+                                titanlib.getVout( 0, "51024e73" ),
                             ],
                         });
                         state.connector_txid = tapscript.Tx.util.getTxid( connector_tx );
@@ -262,7 +269,7 @@
 
                     //validate bob's signatures
                     if ( bobs_sig_on_tx3.length !== 130 || bobs_sig_on_tx4.length !== 130 || !bobs_sig_on_tx3.endsWith( "02" ) || !bobs_sig_on_tx4.endsWith( "82" ) ) return console.log( 'aborting because bob sent sigs of an invalid length' );
-                    var sighash_for_tx3 = tapscript.Signer.taproot.hash( tx3, 0, {extension: swap_tree[ 1 ], sigflag: 0x02 }).hex;
+                    var sighash_for_tx3 = tapscript.Signer.taproot.hash( tx3, 1, {extension: swap_tree[ 1 ], sigflag: 0x02 }).hex;
                     var sig3 = bobs_sig_on_tx3.substring( 0, 128 );
                     var sig_on_tx3_is_valid = await nobleSecp256k1.schnorr.verify( sig3, sighash_for_tx3, bobs_pub );
                     var sighash_for_tx4 = tapscript.Signer.taproot.hash( tx4, 0, {extension: swap_tree[ 1 ], sigflag: 0x82 }).hex;
@@ -290,6 +297,74 @@
 
                     var preimage = prompt( `enter the preimage from paying the LN invoice with this pmthash:`, pmthash );
                     console.log( 'the protocol is complete, you can now unilaterally exit by (1) creating your connector (2) waiting 2026 blocks (3) using the preimage to broadcast tx3 and sweep the funds -- and even if your counterparty broadcasts tx1, you are still safe because you can use the preimage to broadcast tx4 and sweep the funds even anyway' );
+
+                    //let's test it
+                    console.log( 'now we will test unilateral withdrawal. For that, we need to deposit enough coins to pay for two v3 transactions, so we need 1000 sats. Deposit that here:' );
+                    var addy = alices_address;
+                    console.log( `send 1000 sats to this address:` );
+                    console.log( addy );
+                    var txid = prompt( `send 1000 sats to the address in your console and enter the txid` );
+                    var vout = Number( prompt( `and the vout` ) );
+                    var amnt = Number( prompt( `and the amnt` ) );
+
+                    //create the needed exit txs
+                    var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
+                    var exit_tx_1 = tapscript.Tx.create({
+                        version: 3,
+                        vin: [
+                            titanlib.getVin( tx0_txid, 1, 330, alices_address ),
+                        ],
+                        vout: [
+                            titanlib.getVout( 330, alices_address ),
+                            titanlib.getVout( 0, "51024e73" ),
+                        ],
+                    });
+                    var connector_txid = tapscript.Tx.util.getTxid( exit_tx_1 );
+                    var exit_tx_2 = tapscript.Tx.create({
+                        version: 3,
+                        vin: [
+                            titanlib.getVin( txid, vout, amnt, addy ),
+                            titanlib.getVin( connector_txid, 1, 0, "51024e73" ),
+                        ],
+                        vout: [
+                            titanlib.getVout( amnt - txfee, addy ),
+                        ],
+                    });
+                    var exit_tx_2_txid = tapscript.Tx.util.getTxid( exit_tx_2 );
+                    var tx3_txid = tapscript.Tx.util.getTxid( tx3 );
+                    var exit_tx_3 = tapscript.Tx.create({
+                        version: 3,
+                        vin: [
+                            titanlib.getVin( exit_tx_2_txid, 0, amnt - txfee, addy ),
+                            titanlib.getVin( tx3_txid, 1, 0, "51024e73" ),
+                        ],
+                        vout: [
+                            [ "OP_RETURN", "" ]
+                        ],
+                    });
+
+                    //sign the first two exit txs, tx3, and exit_tx_4
+                    var sig_for_exit_1 = tapscript.Signer.taproot.sign( alices_priv, exit_tx_1, 0 );
+                    exit_tx_1.vin[ 0 ].witness = [ sig_for_exit_1 ];
+                    var sig_for_exit_2 = tapscript.Signer.taproot.sign( alices_priv, exit_tx_2, 0 );
+                    exit_tx_2.vin[ 0 ].witness = [ sig_for_exit_2 ];
+                    var first_sig_for_tx3 = tapscript.Signer.taproot.sign( alices_priv, tx3, 0 );
+                    var second_sig_for_tx3 = tapscript.Signer.taproot.sign( alices_priv, tx3, 1, {extension: swap_tree[ 1 ] });
+                    tx3.vin[ 0 ].witness = [ first_sig_for_tx3 ];
+                    tx3.vin[ 1 ].witness = [ bobs_sig_on_tx3, second_sig_for_tx3, preimage, swap_scripts[ 1 ], swap_cblock ];
+                    var sig_for_exit_3 = tapscript.Signer.taproot.sign( alices_priv, exit_tx_3, 0 );
+                    exit_tx_3.vin[ 0 ].witness = [ sig_for_exit_3 ];
+
+                    //broadcast the txs
+                    console.log( 'broadcast exit_tx_1:' );
+                    console.log( tapscript.Tx.encode( exit_tx_1 ).hex );
+                    console.log( 'broadcast exit_tx_2:' );
+                    console.log( tapscript.Tx.encode( exit_tx_2 ).hex );
+                    console.log( 'wait 2026 blocks (but for testing purposes it is only 7)' );
+                    console.log( 'broadcast tx3:' );
+                    console.log( tapscript.Tx.encode( tx3 ).hex );
+                    console.log( 'broadcast exit_tx_3:' );
+                    console.log( tapscript.Tx.encode( exit_tx_3 ).hex );
                 },
                 getTxs: ( state_id, amount, pmthash, utxos, make_connector, txfee ) => {
                     //prepare requisite variables
@@ -362,6 +437,7 @@
                             ],
                             vout: [
                                 titanlib.getVout( 330, alices_address ),
+                                titanlib.getVout( 0, "51024e73" ),
                             ],
                         });
                         connector_txid = tapscript.Tx.util.getTxid( connector_tx );
@@ -377,6 +453,7 @@
                         ],
                         vout: [
                             titanlib.getVout( amount, alices_address ),
+                            titanlib.getVout( 0, "51024e73" ),
                         ],
                     });
 
@@ -390,7 +467,7 @@
                         ],
                     });
 
-                    return { tx0, tx1, tx2, tx3, tx4, swap_addy, swap_tree, swap_cblock };
+                    return { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock };
                 },
                 processMessage: async message => {
                     if ( !message ) message = JSON.parse( prompt( `enter the message from your counterparty` ) );
@@ -483,7 +560,7 @@
 
                             //get the transactions that need to be signed
                             var txs = titanlib.getTxs( state_id, amount, pmthash, utxos_to_use, make_connector, txfee );
-                            var { tx0, tx1, tx2, tx3, tx4, swap_addy, swap_tree, swap_cblock } = txs;
+                            var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
                             if ( make_connector ) {
                                 var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], "regtest" );
                                 var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
@@ -494,13 +571,14 @@
                                     ],
                                     vout: [
                                         titanlib.getVout( 330, alices_address ),
+                                        titanlib.getVout( 0, "51024e73" ),
                                     ],
                                 });
                                 state.connector_txid = tapscript.Tx.util.getTxid( connector_tx );
                             }
 
                             //sign tx3 and tx4
-                            var bobs_sig_on_tx3 = tapscript.Signer.taproot.sign( bobs_priv, tx3, 0, {extension: swap_tree[ 1 ], sigflag: 0x02 }).hex;
+                            var bobs_sig_on_tx3 = tapscript.Signer.taproot.sign( bobs_priv, tx3, 1, {extension: swap_tree[ 1 ], sigflag: 0x02 }).hex;
                             var bobs_sig_on_tx4 = tapscript.Signer.taproot.sign( bobs_priv, tx4, 0, {extension: swap_tree[ 1 ], sigflag: 0x82 }).hex;
 
                             //TODO: show the LN invoice, utxos, and sigs to the user
