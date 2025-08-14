@@ -277,6 +277,7 @@
                     var sighash_for_tx4 = tapscript.Signer.taproot.hash( tx4, 0, {extension: swap_tree[ 1 ], sigflag: 0x82 }).hex;
                     var sig4 = bobs_sig_on_tx4.substring( 0, 128 );
                     var sig_on_tx4_is_valid = await nobleSecp256k1.schnorr.verify( sig4, sighash_for_tx4, bobs_pub );
+                    console.log( "sig:", bobs_sig_on_tx4, "sighash:", sighash_for_tx4, "pubkey:", bobs_pub, "sig_is_valid:", sig_on_tx4_is_valid );
                     if ( !sig_on_tx3_is_valid || !sig_on_tx4_is_valid ) return console.log( 'aborting because bob sent invalid sigs:', sig_on_tx3_is_valid, sig_on_tx4_is_valid );
 
                     //sign tx1 and tx2
@@ -308,6 +309,7 @@
                         preimage,
                         make_connector,
                         utxos,
+                        txfee,
                     });
                 },
                 exitUnilaterally: async ( state_id, tx1_was_broadcasted ) => {
@@ -320,7 +322,8 @@
 
                     //get the utxo you want to withdraw and its txs
                     var utxo_to_withdraw = state.utxos[ 0 ];
-                    var { amount, bobs_sig_on_tx3, bobs_sig_on_tx4, preimage, make_connector, utxos } = utxo_to_withdraw;
+                    //note that the txfee referenced below is the one used when tx0 was created
+                    var { amount, bobs_sig_on_tx3, bobs_sig_on_tx4, preimage, make_connector, utxos, txfee } = utxo_to_withdraw;
                     var pmthash = await titanlib.sha256( titanlib.hexToBytes( preimage ) );
                     var txs = titanlib.getTxs( state_id, amount, pmthash, utxos, make_connector, txfee );
                     var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
@@ -330,9 +333,9 @@
                         //get money to pay for mining fees
                         console.log( 'now we will test unilateral withdrawal. For that, we need to deposit enough coins to pay for one v3 transaction, so we need 500 sats. Deposit that here:' );
                         var addy = alices_address;
-                        console.log( `send 500 or more sats to this address:` );
+                        console.log( `send 1000 or more sats to this address:` );
                         console.log( addy );
-                        var txid = prompt( `send 500 or more sats to the address in your console and enter the txid` );
+                        var txid = prompt( `send 1000 or more sats to the address in your console and enter the txid` );
                         var vout = Number( prompt( `and the vout` ) );
                         var amnt = Number( prompt( `and the amnt` ) );
 
@@ -343,11 +346,11 @@
 
                         //sign tx4
                         var first_sig_on_tx4 = tapscript.Signer.taproot.sign( alices_priv, tx4, 0, {extension: swap_tree[ 1 ]} );
-                        tx4.vin[ 0 ].witness = [ bobs_sig_on_tx3, first_sig_for_tx4, preimage, swap_scripts[ 1 ], swap_cblock ];
+                        tx4.vin[ 0 ].witness = [ bobs_sig_on_tx4, first_sig_on_tx4, preimage, swap_scripts[ 1 ], swap_cblock ];
                         var second_sig_on_tx4 = tapscript.Signer.taproot.sign( alices_priv, tx4, 1 );
-                        tx4.vin[ 1 ].witness = [ second_sig_for_tx4 ];
+                        tx4.vin[ 1 ].witness = [ second_sig_on_tx4 ];
                         var third_sig_on_tx4 = tapscript.Signer.taproot.sign( alices_priv, tx4, 2 );
-                        tx4.vin[ 2 ].witness = [ third_sig_for_tx4 ];
+                        tx4.vin[ 2 ].witness = [ third_sig_on_tx4 ];
 
                         //broadcast tx4
                         console.log( 'broadcast this:' );
