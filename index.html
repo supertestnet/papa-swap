@@ -1715,6 +1715,12 @@
         .selected_currencies button {
             margin: .5rem;
         }
+        .warning {
+            background-color: red;
+            color: white;
+            padding: 1rem;
+            text-align: center;
+        }
         .black-bg {
             width: 100%;
             position: fixed;
@@ -1830,6 +1836,9 @@
 </script>
 </head>
 <body>
+    <div class="warning">
+        Warning: for science only! If you use this wallet you are almost guaranteed to lose your funds. It's just demo code, not production ready.
+    </div>
     <div class="send_page hidden">
         <div id="send_scanner"></div>
         <p class="send_scanner_btns"><button class="paste_invoice">Paste invoice</button><button class="cancel_send_scanner">Cancel</button><button class="close_send_scanner">Close scanner</button><button class="open_send_scanner hidden">Open scanner</button><button class="enter_ln_address">Enter LN address</button></p>
