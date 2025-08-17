@@ -367,7 +367,10 @@
                     txfee,
                 });
 
-                return [ preimage_provided, txfee ];
+                var preimage = preimage_provided;
+                var fees_paid = txfee;
+                var txid = tapscript.Tx.util.getTxid( cut_through_tx );
+                return [ preimage, fees_paid, txid ];
             },
             getLnInvoice: async ( state_id, amount ) => {
                 //prepare requisite variables
@@ -499,7 +502,8 @@
                 var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
                 titanlib.receiveLN( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash );
 
-                return invoice;
+                var txid = tx0_txid;
+                return [ invoice, txid ];
             },
             receiveLN: async ( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash ) => {
                 var state = titanlib.state[ state_id ];
@@ -1473,7 +1477,7 @@
                 showModal( `<p>processing...</p>` );
                 var desc = "brick Wallet";
                 var delay_tolerance = 10;
-                var invoice = await brick_wallet.getInvoice( amnt );
+                var [ invoice, txid ] = await brick_wallet.getInvoice( amnt );
                 $( '.invoice_box' ).innerText = invoice;
                 await brick_wallet.waitSomeTime( 3000 );
                 var callback = data[ "callback" ] + "?pr=" + invoice + "&k1=" + data[ "k1" ];
@@ -1481,7 +1485,7 @@
                 try {
                     var {status: success} = await withdraw_data.json();
                     if ( !success || success !== "OK" ) throw( 'unknown error' );
-                    brick_wallet.processInvoice( invoice );
+                    brick_wallet.processInvoice( invoice, txid );
                     if ( !$( '.modal' ).classList.contains( "hidden" ) ) {
                         showModal( "<p>success</p>" );
                         await brick_wallet.waitSomeTime( 1000 );
@@ -1992,6 +1996,13 @@
                             <p>${tx[ "preimage" ]}</p>
                         </div>
                     `;
+                    var txid_div = "";
+                    if ( "txid" in tx && tx[ "txid" ] ) txid_div = `
+                        <div class="tx_detail_big">
+                            <p style="font-weight: bold;">Txid</p>
+                            <p>${tx[ "txid" ]}</p>
+                        </div>
+                    `;
                     var hidden_or_shown = tx[ "detail_hidden" ] ? "hidden" : "";
                     var identifier = tx[ "type" ] === "incoming" ? "i_" + txid : "o_" + txid;
                     var txdata = `
@@ -2013,6 +2024,7 @@
                                 ${desc_div}
                                 ${pmthash_div}
                                 ${preimage_div}
+                                ${txid_div}
                                 ${invoice_div}
                             </div>
                         </div>
@@ -2078,12 +2090,13 @@
                 showModal( `<p>sending...</p>` );
                 await brick_wallet.waitSomeTime( 2000 );
                 var delay_tolerance = 10;
-                var [ preimage, fees_paid ] = await brick_wallet.getPreimageAndFeesPaid( invoice );
+                var [ preimage, fees_paid, txid ] = await brick_wallet.getPreimageAndFeesPaid( invoice );
                 var payment_hash = brick_wallet.getInvoicePmthash( invoice );
                 var new_txs = {}
                 var new_tx = {invoice, bolt11: invoice, amount, type: "outgoing", preimage, payment_hash, fees_paid, settled_at: Math.floor( Date.now() / 1000 )}
                 new_tx[ "detail_hidden" ] = true;
                 new_tx[ "payment_hash" ] = payment_hash;
+                new_tx[ "txid" ] = txid;
                 new_txs[ "o_" + new_tx[ "payment_hash" ] ] = new_tx;
                 brick_wallet.state.history = { ...new_txs, ...brick_wallet.state.history };
                 brick_wallet.parseHistory();
@@ -2101,7 +2114,7 @@
                 showModal( `<p>loading...</p>` );
                 var desc = "brick Wallet";
                 var delay_tolerance = 10;
-                var invoice = await brick_wallet.getInvoice( amnt );
+                var [ invoice, txid ] = await brick_wallet.getInvoice( amnt );
                 $( '.invoice_box' ).innerText = invoice;
                 var url = "lightning:" + invoice;
                 var a = document.createElement( "a" );
@@ -2120,15 +2133,16 @@
                     showToast( 'copied' );
                 }
                 await brick_wallet.waitSomeTime( 3000 );
-                brick_wallet.processInvoice( invoice );
+                brick_wallet.processInvoice( invoice, txid );
             },
-            processInvoice: async invoice => {
+            processInvoice: async ( invoice, txid ) => {
                 var payment_hash = brick_wallet.getInvoicePmthash( invoice );
                 var amount = Number( bolt11.decode( invoice ).millisatoshis );
                 var new_tx = {invoice, bolt11: invoice, amount, type: "incoming", preimage: "0".repeat( 64 ), payment_hash, fees_paid: 0, settled_at: Math.floor( Date.now() / 1000 )}
                 var new_txs = {}
                 new_tx[ "detail_hidden" ] = true;
                 new_tx[ "payment_hash" ] = payment_hash;
+                new_tx[ "txid" ] = txid;
                 new_txs[ "i_" + new_tx[ "payment_hash" ] ] = new_tx;
                 brick_wallet.state.history = { ...new_txs, ...brick_wallet.state.history };
                 brick_wallet.parseHistory();
@@ -2149,8 +2163,8 @@
             getInvoice: async amnt => {
                 var state_id = Object.keys( titanlib.state )[ 0 ];
                 if ( !state_id.startsWith( "a" ) ) state_id = Object.keys( titanlib.state )[ 1 ];
-                var invoice = await titanlib.getLnInvoice( state_id, amnt );
-                return invoice;
+                var [ invoice, txid ] = await titanlib.getLnInvoice( state_id, amnt );
+                return [ invoice, txid ];
                 throw( `batteries not included -- you must replace this function with one that actually gets an invoice` );
                 // prompt( `enter an invoice for this amount: ${amnt} sats` );
             },
@@ -2159,9 +2173,9 @@
                 var amount = Number( bolt11.decode( invoice ).millisatoshis / 1000 );
                 var state_id = Object.keys( titanlib.state )[ 0 ];
                 if ( !state_id.startsWith( "a" ) ) state_id = Object.keys( titanlib.state )[ 1 ];
-                var [ preimage, fees_paid ] = await titanlib.sendLN( state_id, amount, invoice );
+                var [ preimage, fees_paid, txid ] = await titanlib.sendLN( state_id, amount, invoice );
                 fees_paid = fees_paid * 1000;
-                return [ preimage, fees_paid ];
+                return [ preimage, fees_paid, txid ];
                 // var preimage = prompt( `enter the preimage to this invoice:`, invoice );
                 // var fees_paid = Number( prompt( `enter the amount of sats you paid in fees` ) );
                 // return [ preimage, fees_paid ];
