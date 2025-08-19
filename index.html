@@ -9,6 +9,7 @@
     <script src="https://supertestnet.github.io/bitcoin-chess/js/qrcode.js"></script>
     <script src="https://supertestnet.github.io/bitcoin-chess/js/bolt11.js"></script>
     <script src="https://supertestnet.github.io/bankify/super_nostr.js"></script>
+    <script src="https://supertestnet.github.io/nwcjs/nwcjs.js"></script>
     <script src="https://unpkg.com/@cmdcode/tapscript@1.5.3"></script>
     <script src="https://bundle.run/browserify-cipher@1.0.1"></script>
     <script src="https://bundle.run/noble-secp256k1@1.2.14"></script>
@@ -163,7 +164,7 @@
                 }
                 return state_id;
             },
-            runServer: async () => {
+            runServer: async nwc_string => {
                 var nostr_privkey = titanlib.getPrivkey();
                 var nostr_pubkey = titanlib.getPubkey( nostr_privkey );
                 // var relays = [ "ws://127.0.0.1:6969" ];
@@ -173,6 +174,7 @@
                 titanlib.server_info[ "relays" ] = relays;
                 titanlib.server_info[ "utxos" ] = {};
                 titanlib.server_info[ "address" ] = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
+                titanlib.server_info[ "nwc_string" ] = nwc_string;
                 titanlib.am_server = true;
                 var listenFunction = async socket => {
                     var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
@@ -313,7 +315,7 @@
                 var bobs_sig_is_valid = await nobleSecp256k1.schnorr.verify( b_sig, sighash_on_new_exit_tx, bobs_pub );
                 if ( !bobs_sig_is_valid || !preimage_is_valid ) {
                     //TODO: actually force close
-                    console.log( 'time to force close, your counterparty sent an invalid sig' );
+                    console.log( 'time to force close, your counterparty sent an invalid sig or an invalid preimage' );
                     return;
                 }
 
@@ -433,6 +435,9 @@
                 var sum_of_users_existing_utxos = 0;
                 state.utxos.forEach( utxo => sum_of_users_existing_utxos = sum_of_users_existing_utxos + utxo.amount );
                 var amount_for_swap_addy = amount + sum_of_users_existing_utxos;
+                amount_for_swap_addy = amount_for_swap_addy - txfee;
+                if ( make_connector ) amount_for_swap_addy = amount_for_swap_addy - 330;
+
 
                 //get the transactions that need to be signed
                 var txs = titanlib.getReceiveTxData( state_id, amount_for_swap_addy, pmthash, utxos, make_connector, txfee );
@@ -500,14 +505,14 @@
                 // console.log( `waiting for tx0 to confirm, or at least enter the mempool...` );
 
                 var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
-                titanlib.receiveLN( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash );
+                titanlib.receiveLN( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash, invoice );
 
                 var txid = tx0_txid;
-                return [ invoice, txid ];
+                return [ invoice, txid, txfee ];
             },
-            receiveLN: async ( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash ) => {
+            receiveLN: async ( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash, invoice ) => {
                 var state = titanlib.state[ state_id ];
-                var preimage = prompt( `enter the preimage from paying the LN invoice with this pmthash:`, pmthash );
+                var preimage = prompt( `enter the preimage from paying this LN invoice:`, invoice );
                 console.log( 'the protocol is complete, you can now unilaterally exit by (1) creating your connector (2) waiting 2026 blocks (3) using the preimage to broadcast tx3 and sweep the funds -- and even if your counterparty broadcasts tx1, you are still safe because you can use the preimage to broadcast tx4 and sweep the funds even anyway' );
 
                 //move your old utxo data to past utxos, if necessary
@@ -948,6 +953,8 @@
                         var sum_of_users_existing_utxos = 0;
                         state.utxos.forEach( utxo => sum_of_users_existing_utxos = sum_of_users_existing_utxos + utxo.amount );
                         var amount_for_swap_addy = amount + sum_of_users_existing_utxos;
+                        amount_for_swap_addy = amount_for_swap_addy - txfee;
+                        if ( make_connector ) amount_for_swap_addy = amount_for_swap_addy - 330;
 
                         //find utxos to send to user
                         var findUtxos = async amount => {
@@ -1001,7 +1008,11 @@
 
                         //TODO: create a lightning invoice
                         //for now, I instead create a preimage and payment hash
-                        var invoice = prompt( `enter a lightning invoice for ${amount} sats` );
+                        var nwc_string = titanlib.server_info.nwc_string;
+                        var nwc_info = nwcjs.nwc_infos.length ? nwcjs.nwc_infos[ 0 ] : nwcjs.processNWCstring( nwc_string );
+                        var invoice_data = await nwcjs.makeInvoice( nwc_info, amount, "", 6 );
+                        var invoice = invoice_data.result.invoice;
+                        // var invoice = prompt( `enter a lightning invoice for ${amount} sats` );
                         // var preimage = titanlib.getPrivkey();
                         // console.log( 'preimage user gets upon paying the invoice:' );
                         // console.log( preimage );
@@ -1227,8 +1238,20 @@
 
                         //TODO: pay the lightning invoice
                         //TODO: ensure Alice has not yet made her connector
-                        if ( invoice ) var preimage = prompt( `enter the preimage from paying this ln invoice for the user`, invoice );
+                        if ( invoice ) {
+                            var nwc_string = titanlib.server_info.nwc_string;
+                            var nwc_info = nwcjs.nwc_infos.length ? nwcjs.nwc_infos[ 0 ] : nwcjs.processNWCstring( nwc_string );
+                            nwcjs.tryToPayInvoice( nwc_info, invoice );
+                            var loopTilPaid = async () => {
+                                var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, 6 );
+                                if ( invoice_data.result.hasOwnProperty( "settled_at" ) && invoice_data.result.settled_at ) return invoice_data.result.preimage;
+                                await titanlib.waitSomeTime( 1000 );
+                                return loopTilPaid();
+                            }
+                            var preimage = await loopTilPaid();
+                        }
                         else var preimage = prompt( `enter the preimage from paying an ln invoice for the user` );
+                        // if ( invoice ) var preimage = prompt( `enter the preimage from paying this ln invoice for the user`, invoice );
 
                         //send alice the sig on her new exit tx and the preimage
                         var message = JSON.stringify({
@@ -1477,7 +1500,7 @@
                 showModal( `<p>processing...</p>` );
                 var desc = "brick Wallet";
                 var delay_tolerance = 10;
-                var [ invoice, txid ] = await brick_wallet.getInvoice( amnt );
+                var [ invoice, txid, fees_paid ] = await brick_wallet.getInvoice( amnt );
                 $( '.invoice_box' ).innerText = invoice;
                 await brick_wallet.waitSomeTime( 3000 );
                 var callback = data[ "callback" ] + "?pr=" + invoice + "&k1=" + data[ "k1" ];
@@ -1485,7 +1508,7 @@
                 try {
                     var {status: success} = await withdraw_data.json();
                     if ( !success || success !== "OK" ) throw( 'unknown error' );
-                    brick_wallet.processInvoice( invoice, txid );
+                    brick_wallet.processInvoice( invoice, txid, fees_paid );
                     if ( !$( '.modal' ).classList.contains( "hidden" ) ) {
                         showModal( "<p>success</p>" );
                         await brick_wallet.waitSomeTime( 1000 );
@@ -1917,7 +1940,7 @@
                 var income = 0;
                 var expenses = 0;
                 Object.keys( brick_wallet.state.history ).forEach( item => {
-                    if ( item.startsWith( "i" ) ) income = income + brick_wallet.state.history[ item ].amount;
+                    if ( item.startsWith( "i" ) ) income = income + brick_wallet.state.history[ item ].amount - brick_wallet.state.history[ item ].fees_paid;
                     else expenses = expenses + brick_wallet.state.history[ item ].amount + brick_wallet.state.history[ item ].fees_paid;
                 });
                 balance.setState(()=>{balance.bal = Math.floor( ( income - expenses ) / 1000 ) });
@@ -2014,11 +2037,12 @@
                     `;
                     var hidden_or_shown = tx[ "detail_hidden" ] ? "hidden" : "";
                     var identifier = tx[ "type" ] === "incoming" ? "i_" + txid : "o_" + txid;
+                    var data_sats = tx[ "type" ] === "incoming" ? Math.floor( ( tx[ "amount" ] - tx[ "fees_paid" ] ) / 1000 ) : Math.floor( ( tx[ "amount" ] + tx[ "fees_paid" ] ) / 1000 );
                     var txdata = `
                         <div class="clickable_tx_parent" data-txid="${txid}" data-identifier="${identifier}">
                             <div class="clickable_tx ${incoming_or_outgoing}">
                                 ${arrow}
-                                <span class="noselect tx_amt" data-sats="${Math.floor( ( tx[ "amount" ] + tx[ "fees_paid" ] ) / 1000 )}">${Math.floor( ( tx[ "amount" ] + tx[ "fees_paid" ] ) / 1000 )} sats</span>
+                                <span class="noselect tx_amt" data-sats="${data_sats}">${data_sats} sats</span>
                             </div>
                             <div class="hidable_tx_data ${hidden_or_shown}">
                                 <div class="tx_detail">
@@ -2065,7 +2089,7 @@
                 var income = 0;
                 var expenses = 0;
                 Object.keys( brick_wallet.state.history ).forEach( item => {
-                    if ( item.startsWith( "i" ) ) income = income + brick_wallet.state.history[ item ].amount;
+                    if ( item.startsWith( "i" ) ) income = income + brick_wallet.state.history[ item ].amount - brick_wallet.state.history[ item ].fees_paid;
                     else expenses = expenses + brick_wallet.state.history[ item ].amount + brick_wallet.state.history[ item ].fees_paid;
                 });
                 balance.setState(()=>{balance.bal = Math.floor( ( income - expenses ) / 1000 ) });
@@ -2123,7 +2147,7 @@
                 showModal( `<p>loading...</p>` );
                 var desc = "brick Wallet";
                 var delay_tolerance = 10;
-                var [ invoice, txid ] = await brick_wallet.getInvoice( amnt );
+                var [ invoice, txid, fees_paid ] = await brick_wallet.getInvoice( amnt );
                 $( '.invoice_box' ).innerText = invoice;
                 var url = "lightning:" + invoice;
                 var a = document.createElement( "a" );
@@ -2142,12 +2166,12 @@
                     showToast( 'copied' );
                 }
                 await brick_wallet.waitSomeTime( 3000 );
-                brick_wallet.processInvoice( invoice, txid );
+                brick_wallet.processInvoice( invoice, txid, fees_paid );
             },
-            processInvoice: async ( invoice, txid ) => {
+            processInvoice: async ( invoice, txid, txfee ) => {
                 var payment_hash = brick_wallet.getInvoicePmthash( invoice );
                 var amount = Number( bolt11.decode( invoice ).millisatoshis );
-                var new_tx = {invoice, bolt11: invoice, amount, type: "incoming", preimage: "0".repeat( 64 ), payment_hash, fees_paid: 0, settled_at: Math.floor( Date.now() / 1000 )}
+                var new_tx = {invoice, bolt11: invoice, amount, type: "incoming", preimage: "0".repeat( 64 ), payment_hash, fees_paid: txfee ? txfee : 0, settled_at: Math.floor( Date.now() / 1000 )}
                 var new_txs = {}
                 new_tx[ "detail_hidden" ] = true;
                 new_tx[ "payment_hash" ] = payment_hash;
@@ -2170,11 +2194,12 @@
                 return true;
             },
             getInvoice: async amnt => {
+                // throw( `batteries not included -- you must replace this function with one that actually gets an invoice` );
                 var state_id = Object.keys( titanlib.state )[ 0 ];
                 if ( !state_id.startsWith( "a" ) ) state_id = Object.keys( titanlib.state )[ 1 ];
-                var [ invoice, txid ] = await titanlib.getLnInvoice( state_id, amnt );
-                return [ invoice, txid ];
-                throw( `batteries not included -- you must replace this function with one that actually gets an invoice` );
+                var [ invoice, txid, fees_paid ] = await titanlib.getLnInvoice( state_id, amnt );
+                fees_paid = fees_paid * 1000;
+                return [ invoice, txid, fees_paid ];
                 // prompt( `enter an invoice for this amount: ${amnt} sats` );
             },
             getPreimageAndFeesPaid: async invoice => {
@@ -2689,10 +2714,18 @@
         getForex();
         balance.getPrice();
         if ( $_GET[ "server" ] === "true" ) {
-            (async()=>{
-                var server_nprofile = await titanlib.runServer();
-                $( 'body' ).innerHTML = `<p>thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p>`;
-            })();
+            window.onload = async () => {
+                $( 'body' ).innerHTML = `enter an nwc string.`;
+                setTimeout( async () => {
+                    var nwc_string = prompt( `enter an nwc string` );
+                    if ( !nwc_string || !nwc_string.startsWith( "nostr+walletconnect://" ) ) {
+                        $( 'body' ).innerHTML = `That nwc string was invalid. Refresh the page and try again.`;
+                        return;
+                    }
+                    var server_nprofile = await titanlib.runServer( nwc_string );
+                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                }, 100 );
+            }
         } else {
             window.onload = async () => {
                 setTimeout( async () => {
