@@ -165,17 +165,23 @@
                 return state_id;
             },
             runServer: async nwc_string => {
-                var nostr_privkey = titanlib.getPrivkey();
-                var nostr_pubkey = titanlib.getPubkey( nostr_privkey );
-                // var relays = [ "ws://127.0.0.1:6969" ];
-                var relays = [ "wss://nostrue.com" ];
-                titanlib.server_info[ "nostr_privkey" ] = nostr_privkey;
-                titanlib.server_info[ "nostr_pubkey" ] = nostr_pubkey;
-                titanlib.server_info[ "relays" ] = relays;
-                titanlib.server_info[ "utxos" ] = {};
-                titanlib.server_info[ "address" ] = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
-                titanlib.server_info[ "nwc_string" ] = nwc_string;
                 titanlib.am_server = true;
+                if ( nwc_string ) {
+                    var nostr_privkey = titanlib.getPrivkey();
+                    var nostr_pubkey = titanlib.getPubkey( nostr_privkey );
+                    // var relays = [ "ws://127.0.0.1:6969" ];
+                    var relays = [ "wss://nostrue.com" ];
+                    titanlib.server_info[ "nostr_privkey" ] = nostr_privkey;
+                    titanlib.server_info[ "nostr_pubkey" ] = nostr_pubkey;
+                    titanlib.server_info[ "relays" ] = relays;
+                    titanlib.server_info[ "utxos" ] = {};
+                    titanlib.server_info[ "address" ] = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
+                    titanlib.server_info[ "nwc_string" ] = nwc_string;
+                } else {
+                    var nostr_privkey = titanlib.server_info[ "nostr_privkey" ];
+                    var nostr_pubkey = titanlib.server_info[ "nostr_pubkey" ];
+                    var relays = titanlib.server_info[ "relays" ];
+                }
                 var listenFunction = async socket => {
                     var subId = super_nostr.bytesToHex( crypto.getRandomValues( new Uint8Array( 8 ) ) );
                     var filter  = {}
@@ -339,10 +345,10 @@
                 // console.log( 'send this message to your counterparty:' );
                 // console.log( message );
 
-                //TODO: automate this: watch to see if your counterparty broadcasts the cut-through tx, which they should do within a few seconds; if they do not, exit unilaterally NOT in the manner coded below, but using the titanlib.exitUnilaterally() method. And after doing so, and until you have fully exited, periodically check to see if the funding tx got broadcasted; that would constitute a race condition, in which case you *should* exit unilaterally in the manner displayed below
+                //TODO: automate this: watch to see if your counterparty broadcasts the cut-through tx, which they should do within a few seconds; if they do not, exit unilaterally NOT in the manner coded below, but using the titanlib.exitUnilaterally() method. And after doing so, and until you have fully exited, periodically check to see if the funding tx got broadcasted; that would constitute a race condition, in which case, there's no real worry about getting your money out, because the funding_tx gives you your money, but you should remember to grab the preimage from the sweep tx and treat it as a proof-of-payment of the LN invoice you originally wished to pay
                 var funding_tx_was_broadcasted = confirm( `click ok if the funding_tx got broadcasted` );
                 if ( funding_tx_was_broadcasted ) {
-                    //TODO: if your counterparty does not sweep the funds in the htlc via the preimage path, recover them using the timelock path -- and if he *does* sweep them via the preimage path, grab the preimage from the sweep tx and treat it as a proof-of-payment of the LN invoice you originally wished to pay
+                    //TODO: if your counterparty does not sweep the funds in the htlc via the preimage path, recover them using the timelock path -- and if your counterparty *does* sweep the htlc via the preimage path, grab the preimage from the sweep tx and treat it as a proof-of-payment of the LN invoice you originally wished to pay -- note that you do not need to exit unilaterally in this case because the funding_tx already sends you all of your money
                 }
 
                 //move your old utxo data to past utxos, if necessary
@@ -413,8 +419,15 @@
 
                 //process the reply
                 //TODO: actually extract the pmthash
+                if ( message.msg_value.hasOwnProperty( "error" ) ) {
+                    showModal( `aborting because you got this error message: ${JSON.stringify( message.msg_value.error )}` );
+                    return alert( `aborting because you got this error message: ${JSON.stringify( message.msg_value.error )}` );
+                }
                 var invoice = message.msg_value.invoice;
-                if ( !invoice.startsWith( "ln" ) ) return alert( 'something went wrong, aborting' );
+                if ( !invoice.startsWith( "ln" ) ) {
+                    showModal( 'aborting because something went wrong and the server did not return a lightning invoice' );
+                    return alert( 'aborting because something went wrong and the server did not return a lightning invoice' );
+                }
                 var pmthash = brick_wallet.getInvoicePmthash( invoice );
                 //TODO: ensure the txfee is reasonable based on what the mempool says
                 var { bobs_sig_on_tx3, bobs_sig_on_tx4, utxos, txfee } = message.msg_value;
@@ -505,15 +518,33 @@
                 // console.log( `waiting for tx0 to confirm, or at least enter the mempool...` );
 
                 var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
-                titanlib.receiveLN( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash, invoice );
+                titanlib.receiveLN( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee );
 
                 var txid = tx0_txid;
                 return [ invoice, txid, txfee ];
             },
-            receiveLN: async ( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, txfee, pmthash, invoice ) => {
+            receiveLN: async ( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee ) => {
                 var state = titanlib.state[ state_id ];
-                var preimage = prompt( `enter the preimage from paying this LN invoice:`, invoice );
-                console.log( 'the protocol is complete, you can now unilaterally exit by (1) creating your connector (2) waiting 2026 blocks (3) using the preimage to broadcast tx3 and sweep the funds -- and even if your counterparty broadcasts tx1, you are still safe because you can use the preimage to broadcast tx4 and sweep the funds even anyway' );
+                var setListener = async () => {
+                    var message = await titanlib.listenForReply( `preimage_${pmthash}` );
+                    return message;
+                }
+                //set a 5 minute timer
+                var timer = async () => {
+                    await titanlib.waitSomeTime( 300_000 );
+                    return "time is up";
+                }
+                var preimage_msg = await Promise.any( [ timer(), setListener() ] );
+                if ( preimage_msg === "time is up" ) {
+                    var preimage = prompt( `enter the preimage from paying this LN invoice:`, invoice );
+                } else {
+                    var preimage =  preimage_msg.msg_value.preimage;
+                    //validate preimage
+                    var preimage_matches_expectations = false;
+                    var preimage_hash = await titanlib.sha256( titanlib.hexToBytes( preimage ) );
+                    if ( preimage_hash === pmthash ) preimage_matches_expectations = true;
+                    if ( preimage_matches_expectations ) console.log( 'the protocol is complete, you can now unilaterally exit by (1) creating your connector (2) waiting 2026 blocks (3) using the preimage to broadcast tx3 and sweep the funds -- and even if your counterparty broadcasts tx1, you are still safe because you can use the preimage to broadcast tx4 and sweep the funds even anyway' );
+                }
 
                 //move your old utxo data to past utxos, if necessary
                 if ( state.utxos.length ) {
@@ -540,6 +571,8 @@
                     utxos,
                     txfee,
                 });
+
+                brick_wallet.processInvoice( invoice, txid, txfee * 1000 );
 
                 return true;
             },
@@ -971,26 +1004,44 @@
                                 var sum = 0;
                                 utxos_to_use.forEach( utxo => sum = sum + utxo.amnt );
 
-                                //if you don't have enough utxos, tell the user to deposit sum
+                                //if you don't have enough utxos, return an error
                                 if ( sum < amount ) {
-                                    console.log( amount, sum );
-                                    var addy = titanlib.server_info[ "address" ];
-                                    console.log( `send ${amount - sum} or more sats to this address:` );
-                                    console.log( addy );
-                                    var txid = prompt( `send ${amount - sum} or more sats to the address in your console and enter the txid` );
-                                    if ( txid.length !== 64 ) txid = "a".repeat( 64 );
-                                    var vout = Number( prompt( `and the vout` ) );
-                                    var amnt = Number( prompt( `and the amnt` ) );
-                                    var priv = titanlib.server_info.nostr_privkey;
-                                    var utxo_id = "s_" + titanlib.getPrivkey().substring( 0, 16 );
-                                    titanlib.server_info.utxos[ utxo_id ] = {txid, vout, amnt, addy, priv, utxo_id, unspendable_til: 0};
-                                    return loop();
+                                    var message = JSON.stringify({
+                                        msg_type: "receive_ln_part_one_reply",
+                                        msg_value: {
+                                            error: "not enough funds",
+                                        },
+                                    });
+
+                                    //send message
+                                    var nostr_privkey = titanlib.server_info.nostr_privkey;
+                                    var relays = titanlib.server_info.relays;
+                                    var emsg = await super_nostr.alt_encrypt( nostr_privkey, counterparty, message );
+                                    var event = await super_nostr.prepEvent( nostr_privkey, emsg, 4, [ [ "p", counterparty ] ] );
+                                    super_nostr.sendEvent( event, relays[ 0 ] );
+                                    utxos_to_use = "not enough funds";
+                                    // console.log( amount, sum );
+                                    // var addy = titanlib.server_info[ "address" ];
+                                    // console.log( `send ${amount - sum} or more sats to this address:` );
+                                    // console.log( addy );
+                                    // var txid = prompt( `send ${amount - sum} or more sats to the address in your console and enter the txid` );
+                                    // if ( txid.length !== 64 ) txid = "a".repeat( 64 );
+                                    // var vout = Number( prompt( `and the vout` ) );
+                                    // var amnt = Number( prompt( `and the amnt` ) );
+                                    // var priv = titanlib.server_info.nostr_privkey;
+                                    // var utxo_id = "s_" + titanlib.getPrivkey().substring( 0, 16 );
+                                    // titanlib.server_info.utxos[ utxo_id ] = {txid, vout, amnt, addy, priv, utxo_id, unspendable_til: 0};
+                                    // return loop();
                                 }
                                 return utxos_to_use;
                             }
                             return await loop();
                         }
                         var utxos_to_use = await findUtxos( amount_to_find_utxos_for );
+                        if ( typeof utxos_to_use === "string" ) {
+                            state.blocked_from_receiving = false;
+                            return console.log( utxos_to_use );
+                        }
                         var i_have_change = false;
                         var sum_of_utxos = 0;
                         utxos_to_use.forEach( utxo => sum_of_utxos = sum_of_utxos + utxo.amnt );
@@ -1006,12 +1057,28 @@
                         //add the user's utxos to the tx
                         state.utxos.forEach( utxo => utxos_to_use.push({ txid: utxo.txid, vout: utxo.vout, amnt: utxo.amount, addy: utxo.addy }) );
 
-                        //TODO: create a lightning invoice
-                        //for now, I instead create a preimage and payment hash
+                        //create a lightning invoice
                         var nwc_string = titanlib.server_info.nwc_string;
                         var nwc_info = nwcjs.nwc_infos.length ? nwcjs.nwc_infos[ 0 ] : nwcjs.processNWCstring( nwc_string );
                         var invoice_data = await nwcjs.makeInvoice( nwc_info, amount, "", 6 );
+                        if ( invoice_data.hasOwnProperty( "error" ) && invoice_data.error ) {
+                            var message = JSON.stringify({
+                                msg_type: "receive_ln_part_one_reply",
+                                msg_value: {
+                                    error: invoice_data.error,
+                                },
+                            });
+
+                            //send message
+                            var nostr_privkey = titanlib.server_info.nostr_privkey;
+                            var relays = titanlib.server_info.relays;
+                            var emsg = await super_nostr.alt_encrypt( nostr_privkey, counterparty, message );
+                            var event = await super_nostr.prepEvent( nostr_privkey, emsg, 4, [ [ "p", counterparty ] ] );
+                            super_nostr.sendEvent( event, relays[ 0 ] );
+                            return;
+                        }
                         var invoice = invoice_data.result.invoice;
+                        var preimage = invoice_data.result.preimage;
                         // var invoice = prompt( `enter a lightning invoice for ${amount} sats` );
                         // var preimage = titanlib.getPrivkey();
                         // console.log( 'preimage user gets upon paying the invoice:' );
@@ -1101,6 +1168,7 @@
                         }
 
                         //broadcast tx0
+                        //TODO: actually broadcast tx0
                         console.log( 'broadcast tx0:' );
                         console.log( tapscript.Tx.encode( tx0 ).hex );
 
@@ -1137,16 +1205,51 @@
                         utxos_to_remove.forEach( item => delete titanlib.server_info.utxos[ item ] );
                         var utxo_id = "s_" + titanlib.getPrivkey().substring( 0, 16 );
                         //TODO: ensure the utxo is marked unspendable til a few blocks after tx0 confirms
-                        if ( i_have_change ) titanlib.server_info.utxos[ utxo_id ] = {txid: tapscript.Tx.util.getTxid( tx0 ), vout: make_connector ? 2 : 1, amnt: i_have_change, addy: bobs_address, priv: bobs_priv, utxo_id, unspendable_til: 5}
+                        if ( i_have_change ) {
+                            titanlib.server_info.utxos[ utxo_id ] = {txid: tapscript.Tx.util.getTxid( tx0 ), vout: make_connector ? 2 : 1, amnt: i_have_change, addy: bobs_address, priv: bobs_priv, utxo_id, unspendable_til: 5}
+                        }
 
-                        state.blocked_from_receiving = false;
+                        //check if invoice is paid; if not paid in 5 minutes,
+                        //recover your money and mark the user as blocked
+                        //from sending and receiving
+                        var loopTilPaid = async () => {
+                            var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, 6 );
+                            if ( invoice_data.result.hasOwnProperty( "settled_at" ) && invoice_data.result.settled_at ) return invoice_data.result.preimage;
+                            await titanlib.waitSomeTime( 1000 );
+                            return loopTilPaid();
+                        }
+                        //set a 5 minute timer
+                        var timer = async () => {
+                            await titanlib.waitSomeTime( 300_000 );
+                            return "time is up";
+                        }
+                        var preimage = await Promise.any( [ timer(), loopTilPaid() ] );
 
-                        //try to recover your money?
-                        await titanlib.waitSomeTime( 200 );
-                        var conf = confirm( `click ok to try to recover your money` );
-                        if ( !conf ) return;
+                        //send the preimage to the user
+                        if ( preimage !== "time is up" ) {
+                            var message = JSON.stringify({
+                                msg_type: `preimage_${pmthash}`,
+                                msg_value: {
+                                    state_id,
+                                    preimage,
+                                },
+                            });
+
+                            //send message
+                            var nostr_privkey = titanlib.server_info.nostr_privkey;
+                            var relays = titanlib.server_info.relays;
+                            var emsg = await super_nostr.alt_encrypt( nostr_privkey, counterparty, message );
+                            var event = await super_nostr.prepEvent( nostr_privkey, emsg, 4, [ [ "p", counterparty ] ] );
+                            super_nostr.sendEvent( event, relays[ 0 ] );
+                            state.blocked_from_receiving = false;
+                            return;
+                        }
+
+                        //otherwise, recover your money
 
                         //get money to pay for tx1
+                        state.blocked_from_receiving = true;
+                        state.blocked_from_sending = true;
                         var addy = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
                         console.log( `send 1500 or more sats to this address:` );
                         console.log( addy );
@@ -1236,7 +1339,7 @@
                         var bobs_sig_on_cut_through_tx = tapscript.Signer.taproot.sign( bobs_priv, cut_through_tx, 0, {extension: multisig_tree[ 0 ] }).hex;
                         var bobs_sig_on_new_exit_tx = tapscript.Signer.taproot.sign( bobs_priv, alices_new_exit_tx, 0, {extension: multisig_tree[ 0 ], sigflag: 0x82 }).hex;
 
-                        //TODO: pay the lightning invoice
+                        //pay the lightning invoice
                         //TODO: ensure Alice has not yet made her connector
                         if ( invoice ) {
                             var nwc_string = titanlib.server_info.nwc_string;
@@ -1244,6 +1347,7 @@
                             nwcjs.tryToPayInvoice( nwc_info, invoice );
                             var loopTilPaid = async () => {
                                 var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, 6 );
+                                console.log( invoice_data );
                                 if ( invoice_data.result.hasOwnProperty( "settled_at" ) && invoice_data.result.settled_at ) return invoice_data.result.preimage;
                                 await titanlib.waitSomeTime( 1000 );
                                 return loopTilPaid();
@@ -1270,20 +1374,62 @@
                         // console.log( message );
                         // alert( 'send the message in your console to your counterparty, then click ok' );
 
-                        //process counterparty's reply
+                        //listen for counterparty's reply
                         await titanlib.waitSomeTime( 200 );
-                        var message = await titanlib.listenForReply( "send_ln_part_two" );
-                        // var message = JSON.parse( prompt( `enter your counterparty's reply` ) );
+                        //if user does not send sigs in 5 seconds,
+                        //skip the cut-through transaction
+                        //set a 5 second timer
+                        var timer = async () => {
+                            await titanlib.waitSomeTime( 5_000 );
+                            return "time is up";
+                        }
+                        var message = await Promise.any( [ timer(), titanlib.listenForReply( "send_ln_part_two" ) ] );
 
-                        //validate counterparty's cut-through sig
-                        var alices_sig_on_cut_through_tx = message.msg_value.alices_sig_on_cut_through_tx;
-                        var cut_through_sighash = tapscript.Signer.taproot.hash( cut_through_tx, 0, {extension: multisig_tree[ 0 ] }).hex;
-                        var alices_sig_is_valid = await nobleSecp256k1.schnorr.verify( alices_sig_on_cut_through_tx, cut_through_sighash, alices_pub );
-                        var skip_cut_through = false;
-                        if ( !alices_sig_is_valid ) skip_cut_through = true;
+                        if ( message !== "time is up" ) {
+                            //validate counterparty's cut-through sig
+                            var alices_sig_on_cut_through_tx = message.msg_value.alices_sig_on_cut_through_tx;
+                            var cut_through_sighash = tapscript.Signer.taproot.hash( cut_through_tx, 0, {extension: multisig_tree[ 0 ] }).hex;
+                            var alices_sig_is_valid = await nobleSecp256k1.schnorr.verify( alices_sig_on_cut_through_tx, cut_through_sighash, alices_pub );
+                            var skip_cut_through = false;
+                            if ( !alices_sig_is_valid ) skip_cut_through = true;
+                            else {
+                                //move the user's old utxo data to past utxos, if necessary
+                                if ( state.utxos.length ) {
+                                    var past_utxo = JSON.parse( JSON.stringify( state.utxos[ 0 ] ) );
+                                    //TODO: set a blockheight 10 blocks from now
+                                    var removable_at = 10;
+                                    past_utxo = { ...past_utxo, removable_at };
+                                    //TODO: set up a listener that watches to see if the server initiates a race condition by broadcasting the past utxo's version of tx1; if so, foil his attempt using the past utxo's version of tx4
+                                    state.past_utxos.push( past_utxo );
+                                    state.utxos.pop();
+                                }
 
-                        if ( !skip_cut_through ) skip_cut_through = confirm( `click ok to skip the cut-through (only do this to test the unhappy path)` );
+                                //save the info on the user's new utxo
+                                state.utxos.push({
+                                    txid: tapscript.Tx.util.getTxid( cut_through_tx ),
+                                    vout: 1,
+                                    addy: multisig_addy,
+                                    amount: Number( cut_through_tx.vout[ 1 ].value ),
+                                    pmthash: "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e",
+                                    preimage: "a".repeat( 64 ),
+                                    alices_utxo,
+                                    txfee,
+                                });
+
+                                //broadcast the cut_through tx
+                                cut_through_tx.vin[ 0 ].witness = [ bobs_sig_on_cut_through_tx, alices_sig_on_cut_through_tx, old_swap_scripts[ 0 ], old_swap_cblock ];
+                                console.log( 'broadcast this:' );
+                                console.log( tapscript.Tx.encode( cut_through_tx ).hex );
+                                state.blocked_from_sending = false;
+                                alert( 'broadcast the tx in your console' );
+                            }
+                        } else {
+                            var skip_cut_through = true;
+                        }
+
                         if ( skip_cut_through ) {
+                            state.blocked_from_receiving = true;
+                            state.blocked_from_sending = true;
                             //broadcast the cut-through tx
                             console.log( 'we are skipping the cut through tx' );
                             //broadcast the funding tx and sweeping the funds
@@ -1310,36 +1456,6 @@
                             console.log( 'and this:' );
                             console.log( sweep_txhex );
                         }
-
-                        //broadcast the cut_through tx
-                        cut_through_tx.vin[ 0 ].witness = [ bobs_sig_on_cut_through_tx, alices_sig_on_cut_through_tx, old_swap_scripts[ 0 ], old_swap_cblock ];
-                        console.log( 'broadcast this:' );
-                        console.log( tapscript.Tx.encode( cut_through_tx ).hex );
-                        state.blocked_from_sending = false;
-                        alert( 'broadcast the tx in your console' );
-
-                        //move the user's old utxo data to past utxos, if necessary
-                        if ( state.utxos.length ) {
-                            var past_utxo = JSON.parse( JSON.stringify( state.utxos[ 0 ] ) );
-                            //TODO: set a blockheight 10 blocks from now
-                            var removable_at = 10;
-                            past_utxo = { ...past_utxo, removable_at };
-                            //TODO: set up a listener that watches to see if the server initiates a race condition by broadcasting the past utxo's version of tx1; if so, foil his attempt using the past utxo's version of tx4
-                            state.past_utxos.push( past_utxo );
-                            state.utxos.pop();
-                        }
-
-                        //save the info on the user's new utxo
-                        state.utxos.push({
-                            txid: tapscript.Tx.util.getTxid( cut_through_tx ),
-                            vout: 1,
-                            addy: multisig_addy,
-                            amount: Number( cut_through_tx.vout[ 1 ].value ),
-                            pmthash: "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e",
-                            preimage: "a".repeat( 64 ),
-                            alices_utxo,
-                            txfee,
-                        });
                     }
                 } else {
                     var state_id = "a_" + message.msg_value.state_id.substring( 2 );
@@ -1500,7 +1616,9 @@
                 showModal( `<p>processing...</p>` );
                 var desc = "brick Wallet";
                 var delay_tolerance = 10;
-                var [ invoice, txid, fees_paid ] = await brick_wallet.getInvoice( amnt );
+                var data_from_get_invoice_function = await brick_wallet.getInvoice( amnt );
+                if ( typeof data_from_get_invoice_function === "string" ) return alert( data_from_get_invoice_function );
+                var [ invoice, txid, fees_paid ] = data_from_get_invoice_function;
                 $( '.invoice_box' ).innerText = invoice;
                 await brick_wallet.waitSomeTime( 3000 );
                 var callback = data[ "callback" ] + "?pr=" + invoice + "&k1=" + data[ "k1" ];
@@ -2147,7 +2265,12 @@
                 showModal( `<p>loading...</p>` );
                 var desc = "brick Wallet";
                 var delay_tolerance = 10;
-                var [ invoice, txid, fees_paid ] = await brick_wallet.getInvoice( amnt );
+                var data_from_get_invoice_function = await brick_wallet.getInvoice( amnt );
+                if ( typeof data_from_get_invoice_function === "string" ) {
+                    modalVanish();
+                    return;
+                }
+                var [ invoice, txid, fees_paid ] = data_from_get_invoice_function;
                 $( '.invoice_box' ).innerText = invoice;
                 var url = "lightning:" + invoice;
                 var a = document.createElement( "a" );
@@ -2165,8 +2288,6 @@
                     navigator.clipboard.writeText( copytext.value );
                     showToast( 'copied' );
                 }
-                await brick_wallet.waitSomeTime( 3000 );
-                brick_wallet.processInvoice( invoice, txid, fees_paid );
             },
             processInvoice: async ( invoice, txid, txfee ) => {
                 var payment_hash = brick_wallet.getInvoicePmthash( invoice );
@@ -2197,7 +2318,9 @@
                 // throw( `batteries not included -- you must replace this function with one that actually gets an invoice` );
                 var state_id = Object.keys( titanlib.state )[ 0 ];
                 if ( !state_id.startsWith( "a" ) ) state_id = Object.keys( titanlib.state )[ 1 ];
-                var [ invoice, txid, fees_paid ] = await titanlib.getLnInvoice( state_id, amnt );
+                var data_from_titanlib = await titanlib.getLnInvoice( state_id, amnt );
+                if ( !data_from_titanlib ) return "aborted due to unknown error";
+                var [ invoice, txid, fees_paid ] = data_from_titanlib;
                 fees_paid = fees_paid * 1000;
                 return [ invoice, txid, fees_paid ];
                 // prompt( `enter an invoice for this amount: ${amnt} sats` );
@@ -2677,44 +2800,25 @@
             }
         };
 
-        //Local storage and initialization
-
-        if ( localStorage[ "brick_wallet_state" ] ) brick_wallet.state = JSON.parse( localStorage[ "brick_wallet_state" ] );
-        if ( localStorage[ "titan_wallet_state" ] ) titanlib.state = JSON.parse( localStorage[ "titan_wallet_state" ] );
-        var walletSaver = async () => {
-            if ( stop_the_save ) {
-                window.location.reload();
-                return;
-            } else {
-                localStorage[ "brick_wallet_state" ] = JSON.stringify( brick_wallet.state );
-                localStorage[ "titan_wallet_state" ] = JSON.stringify( titanlib.state );
-                await brick_wallet.waitSomeTime( 1000 );
+        //start server or wallet, depending on url params
+        if ( $_GET[ "server" ] === "true" ) {
+            //local storage and initialization
+            if ( localStorage[ "titan_server_info" ] ) titanlib.server_info = JSON.parse( localStorage[ "titan_server_info" ] );
+            if ( localStorage[ "titan_wallet_state" ] ) titanlib.state = JSON.parse( localStorage[ "titan_wallet_state" ] );
+            var walletSaver = async () => {
+                if ( stop_the_save ) {
+                    window.location.reload();
+                    return;
+                } else {
+                    localStorage[ "titan_server_info" ] = JSON.stringify( titanlib.server_info );
+                    localStorage[ "titan_wallet_state" ] = JSON.stringify( titanlib.state );
+                    await brick_wallet.waitSomeTime( 1000 );
+                }
+                walletSaver();
             }
             walletSaver();
-        }
-        walletSaver();
-        brick_wallet.state.offset = 0;
-        if ( "selected_currencies" in brick_wallet.state && brick_wallet.state.selected_currencies.length ) balance.currencies = brick_wallet.state.selected_currencies;
-        if ( "supported_currencies" in brick_wallet.state && brick_wallet.state.supported_currencies.length ) balance.supported_currencies = brick_wallet.state.supported_currencies;
-        Object.keys( brick_wallet.state.history ).forEach( txid => {
-            var tx = brick_wallet.state.history[ txid ];
-            if ( !tx[ "detail_hidden" ] ) tx[ "detail_hidden" ] = true;
-        });
-        var getForex = async () => {
-            var i; for ( i=0; i<balance.currencies.length; i++ ) {
-                var currency = balance.currencies[ i ];
-                if ( currency !== "sats" && currency !== "btc" && currency !== "usd" && !( currency in balance.forex ) ) {
-                    var rate = await balance.getTicker( currency.toUpperCase() );
-                    // console.log( `got rate for ${currency}: 1 usd = ${rate} ${currency}` );
-                    balance.forex[ currency ] = rate;
-                    await brick_wallet.waitSomeTime( 2000 );
-                }
-            }
-        }
-        getForex();
-        balance.getPrice();
-        if ( $_GET[ "server" ] === "true" ) {
-            window.onload = async () => {
+
+            if ( !titanlib.server_info.nwc_string ) {
                 $( 'body' ).innerHTML = `enter an nwc string.`;
                 setTimeout( async () => {
                     var nwc_string = prompt( `enter an nwc string` );
@@ -2723,32 +2827,112 @@
                         return;
                     }
                     var server_nprofile = await titanlib.runServer( nwc_string );
-                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                    var nostr_privkey = titanlib.server_info[ "nostr_privkey" ];
+                    var nostr_pubkey = titanlib.server_info[ "nostr_pubkey" ];
+                    var deposit_addy = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
+                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to recover your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Balance deposited:</p><p><span class="server_balance">0</span> sats</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                    var balanceLoop = async () => {
+                        var utxo_id = titanlib.getPrivkey().substring( 0, 16 );
+                        titanlib.server_info.utxos[ utxo_id ] = {
+                            txid: "a".repeat( 64 ),
+                            vout: 0,
+                            amnt: 100_000,
+                            addy: deposit_addy,
+                            priv: nostr_privkey,
+                            utxo_id,
+                        }
+                        var bal = 0;
+                        Object.keys( titanlib.server_info.utxos ).forEach( item => bal = bal + titanlib.server_info.utxos[ item ].amnt );
+                        $( '.server_balance' ).innerText = bal.toLocaleString();
+                        await titanlib.waitSomeTime( 10_000 );
+                        balanceLoop();
+                    }
+                    balanceLoop();
                 }, 100 );
+            } else {
+                var nostr_privkey = titanlib.server_info[ "nostr_privkey" ];
+                var nostr_pubkey = titanlib.server_info[ "nostr_pubkey" ];
+                var deposit_addy = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
+                var relays = titanlib.server_info[ "relays" ];
+                var server_nprofile = titanlib.convertPubkeyAndRelaysToNprofile( "nprofile", nostr_pubkey, relays );
+                titanlib.runServer();
+                $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to recover your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Balance deposited:</p><p><span class="server_balance">0</span> sats</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                var balanceLoop = async () => {
+                    var utxo_id = titanlib.getPrivkey().substring( 0, 16 );
+                    titanlib.server_info.utxos[ utxo_id ] = {
+                        txid: "a".repeat( 64 ),
+                        vout: 0,
+                        amnt: 100_000,
+                        addy: deposit_addy,
+                        priv: nostr_privkey,
+                        utxo_id,
+                    }
+                    var bal = 0;
+                    Object.keys( titanlib.server_info.utxos ).forEach( item => bal = bal + titanlib.server_info.utxos[ item ].amnt );
+                    $( '.server_balance' ).innerText = bal.toLocaleString();
+                    await titanlib.waitSomeTime( 10_000 );
+                    balanceLoop();
+                }
+                balanceLoop();
             }
         } else {
-            window.onload = async () => {
-                setTimeout( async () => {
-                    var state_exists = false;
-                    Object.keys( titanlib.state ).forEach( item => {
-                        if ( item.startsWith( "a" ) ) state_exists = true;
-                    });
-                    if ( state_exists ) {
-                        titanlib.init();
-                        brick_wallet.init();
-                        modalVanish();
-                        return;
+            //local storage and initialization
+            if ( localStorage[ "brick_wallet_state" ] ) brick_wallet.state = JSON.parse( localStorage[ "brick_wallet_state" ] );
+            if ( localStorage[ "titan_wallet_state" ] ) titanlib.state = JSON.parse( localStorage[ "titan_wallet_state" ] );
+            var walletSaver = async () => {
+                if ( stop_the_save ) {
+                    window.location.reload();
+                    return;
+                } else {
+                    localStorage[ "brick_wallet_state" ] = JSON.stringify( brick_wallet.state );
+                    localStorage[ "titan_wallet_state" ] = JSON.stringify( titanlib.state );
+                    await brick_wallet.waitSomeTime( 1000 );
+                }
+                walletSaver();
+            }
+            walletSaver();
+            brick_wallet.state.offset = 0;
+            if ( "selected_currencies" in brick_wallet.state && brick_wallet.state.selected_currencies.length ) balance.currencies = brick_wallet.state.selected_currencies;
+            if ( "supported_currencies" in brick_wallet.state && brick_wallet.state.supported_currencies.length ) balance.supported_currencies = brick_wallet.state.supported_currencies;
+            Object.keys( brick_wallet.state.history ).forEach( txid => {
+                var tx = brick_wallet.state.history[ txid ];
+                if ( !tx[ "detail_hidden" ] ) tx[ "detail_hidden" ] = true;
+            });
+            var getForex = async () => {
+                var i; for ( i=0; i<balance.currencies.length; i++ ) {
+                    var currency = balance.currencies[ i ];
+                    if ( currency !== "sats" && currency !== "btc" && currency !== "usd" && !( currency in balance.forex ) ) {
+                        var rate = await balance.getTicker( currency.toUpperCase() );
+                        // console.log( `got rate for ${currency}: 1 usd = ${rate} ${currency}` );
+                        balance.forex[ currency ] = rate;
+                        await brick_wallet.waitSomeTime( 2000 );
                     }
-                    var url = window.location.protocol + "//" + window.location.hostname + window.location.pathname + "?server=true";
-                    var server_nprofile = prompt( `enter the server's nprofile. note that you can *run* a server by visiting this url: ${url}` );
-                    if ( server_nprofile && server_nprofile.startsWith( "nprofile1" ) ) {
-                        var make_new_state = true;
-                        titanlib.init( server_nprofile, make_new_state );
-                    }
+                }
+            }
+            getForex();
+            balance.getPrice();
+
+            //load existing titanlib state
+            setTimeout( async () => {
+                var state_exists = false;
+                Object.keys( titanlib.state ).forEach( item => {
+                    if ( item.startsWith( "a" ) ) state_exists = true;
+                });
+                if ( state_exists ) {
+                    titanlib.init();
                     brick_wallet.init();
                     modalVanish();
-                }, 100 );
-            }
+                    return;
+                }
+                var url = window.location.protocol + "//" + window.location.hostname + window.location.pathname + "?server=true";
+                var server_nprofile = prompt( `enter the server's nprofile. note that you can *run* a server by visiting this url: ${url}` );
+                if ( server_nprofile && server_nprofile.startsWith( "nprofile1" ) ) {
+                    var make_new_state = true;
+                    titanlib.init( server_nprofile, make_new_state );
+                }
+                brick_wallet.init();
+                modalVanish();
+            }, 100 );
         }
     </script>
     <div class="black-bg hidden"></div>
