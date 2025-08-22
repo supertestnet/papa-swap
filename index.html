@@ -567,7 +567,7 @@
                     await titanlib.waitSomeTime( 300_000 );
                     return "time is up";
                 }
-                console.log( 'test17', 'I am setting a 5 minute timer -- if I do not receive the preimage in 5 minutes, we are done' );
+                console.log( 'test17', 'I am setting a 5 minute timer -- if I do not receive the preimage in 5 minutes, I will ask the user to get it' );
                 var preimage_msg = await Promise.any( [ timer(), setListener() ] );
                 if ( preimage_msg === "time is up" ) {
                     var preimage = prompt( `enter the preimage from paying this LN invoice:`, invoice );
@@ -1264,8 +1264,9 @@
                         var loopTilPaid = async () => {
                             console.log( 'test19', 'checking if an invoice is paid...' );
                             var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, titanlib.nwc_timeout );
-                            if ( invoice_data.result.hasOwnProperty( "settled_at" ) && invoice_data.result.settled_at ) return invoice_data.result.preimage;
-                            console.log( 'test20', 'it is not paid' );
+                            console.log( 'test20', invoice_data );
+                            if ( invoice_data.hasOwnProperty( "result" ) && invoice_data.result.hasOwnProperty( "settled_at" ) && invoice_data.result.settled_at ) return invoice_data.result.preimage;
+                            console.log( 'test21', 'it is not paid' );
                             await titanlib.waitSomeTime( 1000 );
                             return loopTilPaid();
                         }
@@ -1276,7 +1277,7 @@
                         }
                         console.log( 'test18', 'before I get my preimage, I am setting a 5 minute timer' );
                         var preimage = await Promise.any( [ timer(), loopTilPaid() ] );
-                        console.log( 'test21', 'got my preimage, now sending it to user:', preimage );
+                        console.log( 'test22', 'got my preimage, now sending it to user:', preimage );
 
                         //send the preimage to the user
                         if ( preimage !== "time is up" ) {
@@ -2831,7 +2832,7 @@
             console.log( txhex );
             titanlib.pushBTCpmt( txhex, titanlib.blockchain );
             await titanlib.waitSomeTime( 2_000 );
-            alert( `broadcast the tx in your console and you are done` );
+            alert( `You have exited, your wallet will now reset` );
 
             localStorage.removeItem( "brick_wallet_state" );
             stop_the_save = true;
@@ -3076,7 +3077,7 @@
                     var nostr_pubkey = titanlib.server_info[ "nostr_pubkey" ];
                     var deposit_addy = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
                     $( 'body' ).style = "word-wrap: break-word;";
-                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p>${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to recover your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Balance:</p><p><span class="server_balance">0</span> sats</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p>${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p><p>Balance:</p><p><span class="server_balance">0</span> sats</p><hr>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to manage your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
                     var balanceLoop = async () => {
                         var utxos = await titanlib.getUTXOs( nostr_privkey, titanlib.blockchain );
                         titanlib.server_info.utxos = {}
@@ -3102,7 +3103,8 @@
                 var relays = titanlib.server_info[ "relays" ];
                 var server_nprofile = titanlib.convertPubkeyAndRelaysToNprofile( "nprofile", nostr_pubkey, relays );
                 titanlib.runServer();
-                $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to recover your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Balance deposited:</p><p><span class="server_balance">0</span> sats</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                $( 'body' ).style = "word-wrap: break-word;";
+                $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p>${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p><p>Balance:</p><p><span class="server_balance">0</span> sats</p><hr>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to manage your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
                 var balanceLoop = async () => {
                     var utxos = await titanlib.getUTXOs( nostr_privkey, titanlib.blockchain );
                     titanlib.server_info.utxos = {}
