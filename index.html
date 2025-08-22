@@ -20,9 +20,11 @@
             server_info: {},
             network: "testnet",
             blockchain: "testnet4/",
+            explorer: "mempool.emzy.de",
             backup_pubkey: "a".repeat( 64 ),
             am_server: false,
             listeners: {},
+            nwc_timeout: 20,
             hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
             bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
             getPrivkey: () => titanlib.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ),
@@ -116,6 +118,7 @@
                     titanlib.state[ state_id ][ "utxos" ] = [];
                     titanlib.state[ state_id ][ "past_utxos" ] = [];
                     titanlib.state[ state_id ][ "nostr_privkey" ] = super_nostr.getPrivkey();
+                    titanlib.state[ state_id ][ "watchtower" ] = {}
                 }
                 var nostr_privkey = titanlib.state[ state_id ][ "nostr_privkey" ];
                 var nostr_pubkey = super_nostr.getPubkey( nostr_privkey );
@@ -170,8 +173,8 @@
                 if ( nwc_string ) {
                     var nostr_privkey = titanlib.getPrivkey();
                     var nostr_pubkey = titanlib.getPubkey( nostr_privkey );
-                    var relays = [ "ws://127.0.0.1:6969" ];
-                    // var relays = [ "wss://nostrue.com" ];
+                    // var relays = [ "ws://127.0.0.1:6969" ];
+                    var relays = [ "wss://nostrue.com" ];
                     titanlib.server_info[ "nostr_privkey" ] = nostr_privkey;
                     titanlib.server_info[ "nostr_pubkey" ] = nostr_pubkey;
                     titanlib.server_info[ "relays" ] = relays;
@@ -201,7 +204,7 @@
                         titanlib.listeners[ JSON.parse( event.content ).msg_type ] = JSON.parse( event.content );
                         return;
                     }
-                    titanlib.processMessage( JSON.parse( event.content ), event.pubkey );
+                    titanlib.processMessage( JSON.parse( event.content ), event.pubkey, nostr_pubkey );
                 }
                 var connection = await super_nostr.newPermanentConnection( relays[ 0 ], listenFunction, handleFunction );
                 //TODO: set up listener on nostr
@@ -346,10 +349,39 @@
                 // console.log( 'send this message to your counterparty:' );
                 // console.log( message );
 
-                //TODO: automate this: watch to see if your counterparty broadcasts the cut-through tx, which they should do within a few seconds; if they do not, exit unilaterally NOT in the manner coded below, but using the titanlib.exitUnilaterally() method. And after doing so, and until you have fully exited, periodically check to see if the funding tx got broadcasted; that would constitute a race condition, in which case, there's no real worry about getting your money out, because the funding_tx gives you your money, but you should remember to grab the preimage from the sweep tx and treat it as a proof-of-payment of the LN invoice you originally wished to pay
-                var funding_tx_was_broadcasted = confirm( `click ok if the funding_tx got broadcasted` );
-                if ( funding_tx_was_broadcasted ) {
-                    //TODO: if your counterparty does not sweep the funds in the htlc via the preimage path, recover them using the timelock path -- and if your counterparty *does* sweep the htlc via the preimage path, grab the preimage from the sweep tx and treat it as a proof-of-payment of the LN invoice you originally wished to pay -- note that you do not need to exit unilaterally in this case because the funding_tx already sends you all of your money
+                //set up a watchtower for the funding_txid
+                var funding_txid = tapscript.Tx.util.getTxid( funding_tx );
+                var cut_through_txid = tapscript.Tx.util.getTxid( cut_through_tx );
+                state.watchtower[ funding_txid ] = {
+                    what_to_do: "sweep_the_swap_output_or_grab_its_preimage",
+                    when_to_stop_watchtower: 6,
+                    removal_txid: cut_through_txid,
+                    my_sweep_data: {
+                        txid: funding_tx,
+                        vout: 0,
+                        prevout: {
+                            value: amount,
+                            addy: swap_addy,
+                        },
+                        swap_scripts,
+                        swap_tree,
+                        swap_cblock,
+                        //TODO: change the 7 to 2026
+                        blocks_to_wait: 7,
+                    },
+                }
+
+                //watch to see if your counterparty broadcasts the cut-through tx, which they should do within a few seconds; if they do not, run titanlib.exitUnilaterally()
+                //set a 5 minute timer
+                var timer = async () => {
+                    await titanlib.waitSomeTime( 30_000 );
+                    return "time is up";
+                }
+                var watcher = titanlib.watchForTxid( cut_through_txid, titanlib.blockchain );
+                var time_is_up = await Promise.any( [ timer(), watcher ] );
+                if ( time_is_up ) {
+                    titanlib.exitUnilaterally( state_id );
+                    return;
                 }
 
                 //move your old utxo data to past utxos, if necessary
@@ -448,13 +480,12 @@
                 //modify the amount for the swap addy to include your own utxo contribution(s)
                 var sum_of_users_existing_utxos = 0;
                 state.utxos.forEach( utxo => sum_of_users_existing_utxos = sum_of_users_existing_utxos + utxo.amount );
-                var amount_for_swap_addy = amount + sum_of_users_existing_utxos;
-                amount_for_swap_addy = amount_for_swap_addy - txfee;
-                if ( make_connector ) amount_for_swap_addy = amount_for_swap_addy - 330;
-
+                var amnt_for_swap_addy = amount + sum_of_users_existing_utxos;
+                amnt_for_swap_addy = amnt_for_swap_addy - txfee;
+                if ( make_connector ) amnt_for_swap_addy = amnt_for_swap_addy - 330;
 
                 //get the transactions that need to be signed
-                var txs = titanlib.getReceiveTxData( state_id, amount_for_swap_addy, pmthash, utxos, make_connector, txfee );
+                var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos, make_connector, txfee );
                 var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
                 if ( make_connector ) {
                     var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
@@ -519,12 +550,13 @@
                 // console.log( `waiting for tx0 to confirm, or at least enter the mempool...` );
 
                 var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
-                titanlib.receiveLN( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee );
+                var tx1_txid = tapscript.Tx.util.getTxid( tx1 );
+                titanlib.receiveLN( state_id, tx0_txid, tx1_txid, swap_addy, amnt_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee );
 
                 var txid = tx0_txid;
                 return [ invoice, txid, txfee ];
             },
-            receiveLN: async ( state_id, tx0_txid, swap_addy, amount_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee ) => {
+            receiveLN: async ( state_id, tx0_txid, tx1_txid, swap_addy, amnt_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee ) => {
                 var state = titanlib.state[ state_id ];
                 var setListener = async () => {
                     var message = await titanlib.listenForReply( `preimage_${pmthash}` );
@@ -535,6 +567,7 @@
                     await titanlib.waitSomeTime( 300_000 );
                     return "time is up";
                 }
+                console.log( 'test17', 'I am setting a 5 minute timer -- if I do not receive the preimage in 5 minutes, we are done' );
                 var preimage_msg = await Promise.any( [ timer(), setListener() ] );
                 if ( preimage_msg === "time is up" ) {
                     var preimage = prompt( `enter the preimage from paying this LN invoice:`, invoice );
@@ -545,6 +578,13 @@
                     var preimage_hash = await titanlib.sha256( titanlib.hexToBytes( preimage ) );
                     if ( preimage_hash === pmthash ) preimage_matches_expectations = true;
                     if ( preimage_matches_expectations ) console.log( 'the protocol is complete, you can now unilaterally exit by (1) creating your connector (2) waiting 2026 blocks (3) using the preimage to broadcast tx3 and sweep the funds -- and even if your counterparty broadcasts tx1, you are still safe because you can use the preimage to broadcast tx4 and sweep the funds even anyway' );
+                }
+
+                //set up a watchtower for tx1
+                state.watchtower[ tx1_txid ] = {
+                    what_to_do: "exit_unilaterally",
+                    when_to_stop_watchtower: 6,
+                    removal_txid: tx0_txid,
                 }
 
                 //move your old utxo data to past utxos, if necessary
@@ -563,7 +603,7 @@
                     txid: tx0_txid,
                     vout: 0,
                     addy: swap_addy,
-                    amount: amount_for_swap_addy,
+                    amount: amnt_for_swap_addy,
                     bobs_sig_on_tx3,
                     bobs_sig_on_tx4,
                     pmthash,
@@ -685,8 +725,10 @@
                         tx4.vin[ 2 ].witness = [ third_sig_on_tx4 ];
 
                         //broadcast tx4
-                        console.log( 'broadcast this:' );
+                        console.log( 'broadcast this tx4:' );
                         console.log( tapscript.Tx.encode( tx4 ).hex );
+                        titanlib.pushBTCpmt( tapscript.Tx.encode( tx4 ).hex, titanlib.blockchain );
+                        await titanlib.waitSomeTime( 2_000 );
                         alert( 'broadcast the tx in your console' );
                         return;
                     } else {
@@ -769,7 +811,8 @@
                 var alices_pub = state.alices_pub;
                 var bobs_pub = state.bobs_pub;
                 var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
-                var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
+                var bobs_nostr_pub = state[ "server_nostr_pubkey" ];
+                var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_nostr_pub ], titanlib.network );
                 var swap_scripts = titanlib.subSwapScript( state_id, pmthash );
                 var [ swap_addy, swap_tree, swap_cblock ] = titanlib.getAddressData( swap_scripts, 1 );
                 var multisig_scripts = [ [ alices_pub, "OP_CHECKSIGVERIFY", bobs_pub, "OP_CHECKSIG" ] ];
@@ -822,7 +865,8 @@
                 var alices_pub = state.alices_pub;
                 var bobs_pub = state.bobs_pub;
                 var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
-                var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
+                var bobs_nostr_pub = state[ "server_nostr_pubkey" ];
+                var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_nostr_pub ], titanlib.network );
                 var connector_txid = null;
                 if ( state.connector_txid ) connector_txid = state.connector_txid;
 
@@ -837,16 +881,16 @@
                     sum = sum + utxo.amnt;
                     vin.push( titanlib.getVin( utxo.txid, utxo.vout, utxo.amnt, utxo.addy ) );
                 });
-                var amnt_for_swap_addy = sum - txfee;
+                var amnt_for_change_addy = sum - txfee;
 
                 //prepare the outputs for tx0
                 var vout = [];
-                vout.push( titanlib.getVout( amount, swap_addy ) );
                 if ( make_connector ) {
                     vout.push( titanlib.getVout( 330, alices_address ) );
-                    amnt_for_swap_addy = amnt_for_swap_addy - 330;
+                    amnt_for_change_addy = amnt_for_change_addy - 330;
                 }
-                if ( amnt_for_swap_addy - amount > 330 ) vout.push( titanlib.getVout( amnt_for_swap_addy - amount, bobs_address ) );
+                vout.unshift( titanlib.getVout( amount, swap_addy ) );
+                if ( amnt_for_change_addy - amount > 330 ) vout.push( titanlib.getVout( amnt_for_change_addy - amount, bobs_address ) );
 
                 //prepare tx0
                 var tx0 = tapscript.Tx.create({
@@ -920,7 +964,7 @@
 
                 return { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock };
             },
-            processMessage: async ( message, counterparty ) => {
+            processMessage: async ( message, counterparty, server_nostr_pubkey ) => {
                 if ( !message ) message = JSON.parse( prompt( `enter the message from your counterparty` ) );
                 var am_server = titanlib.am_server;
                 if ( titanlib.am_server ) {
@@ -934,6 +978,7 @@
                         titanlib.state[ state_id ][ "alices_priv" ] = null;
                         titanlib.state[ state_id ][ "alices_pub" ] = alices_pub;
                         titanlib.state[ state_id ][ "bobs_priv" ] = privkey;
+                        titanlib.state[ state_id ][ "server_nostr_pubkey" ] = server_nostr_pubkey;
                         titanlib.state[ state_id ][ "bobs_pub" ] = pubkey;
                         titanlib.state[ state_id ][ "relays" ] = titanlib.server_info.relays;
                         titanlib.state[ state_id ][ "utxos" ] = [];
@@ -974,7 +1019,8 @@
                         var bobs_priv = state.bobs_priv;
                         var alices_pub = state.alices_pub;
                         var bobs_pub = state.bobs_pub;
-                        var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
+                        var bobs_nostr_pub = state[ "server_nostr_pubkey" ];
+                        var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_nostr_pub ], titanlib.network );
                         var amount = message.msg_value.amount;
                         if ( typeof amount !== "number" ) return console.log( 'aborting because user tried to scam you with an amount that is not a number' );
                         var make_connector = !state.connector_txid;
@@ -986,9 +1032,9 @@
                         amount_to_find_utxos_for = amount_to_find_utxos_for + txfee;
                         var sum_of_users_existing_utxos = 0;
                         state.utxos.forEach( utxo => sum_of_users_existing_utxos = sum_of_users_existing_utxos + utxo.amount );
-                        var amount_for_swap_addy = amount + sum_of_users_existing_utxos;
-                        amount_for_swap_addy = amount_for_swap_addy - txfee;
-                        if ( make_connector ) amount_for_swap_addy = amount_for_swap_addy - 330;
+                        var amnt_for_swap_addy = amount + sum_of_users_existing_utxos;
+                        amnt_for_swap_addy = amnt_for_swap_addy - txfee;
+                        if ( make_connector ) amnt_for_swap_addy = amnt_for_swap_addy - 330;
 
                         //find utxos to send to user
                         var findUtxos = async amount => {
@@ -1061,7 +1107,7 @@
                         //create a lightning invoice
                         var nwc_string = titanlib.server_info.nwc_string;
                         var nwc_info = nwcjs.nwc_infos.length ? nwcjs.nwc_infos[ 0 ] : nwcjs.processNWCstring( nwc_string );
-                        var invoice_data = await nwcjs.makeInvoice( nwc_info, amount, "", 6 );
+                        var invoice_data = await nwcjs.makeInvoice( nwc_info, amount, "", titanlib.nwc_timeout );
                         if ( invoice_data.hasOwnProperty( "error" ) && invoice_data.error ) {
                             var message = JSON.stringify({
                                 msg_type: "receive_ln_part_one_reply",
@@ -1088,7 +1134,7 @@
                         var pmthash = brick_wallet.getInvoicePmthash( invoice );
 
                         //get the transactions that need to be signed
-                        var txs = titanlib.getReceiveTxData( state_id, amount_for_swap_addy, pmthash, utxos_to_use, make_connector, txfee );
+                        var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos_to_use, make_connector, txfee );
                         var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
                         if ( make_connector ) {
                             var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
@@ -1170,6 +1216,7 @@
 
                         //broadcast tx0
                         //TODO: actually broadcast tx0
+                        titanlib.pushBTCpmt( tapscript.Tx.encode( tx0 ).hex, titanlib.blockchain );
                         console.log( 'broadcast tx0:' );
                         console.log( tapscript.Tx.encode( tx0 ).hex );
 
@@ -1188,7 +1235,7 @@
                             txid: tapscript.Tx.util.getTxid( tx0 ),
                             vout: 0,
                             addy: swap_addy,
-                            amount: amount_for_swap_addy,
+                            amount: amnt_for_swap_addy,
                             alices_sig_on_tx1,
                             alices_sig_on_tx2,
                             pmthash,
@@ -1204,7 +1251,8 @@
                             if ( item.hasOwnProperty( "utxo_id" ) ) utxos_to_remove.push( item.utxo_id );
                         });
                         utxos_to_remove.forEach( item => delete titanlib.server_info.utxos[ item ] );
-                        var utxo_id = "s_" + titanlib.getPrivkey().substring( 0, 16 );
+                        var vout_for_display = make_connector ? 2 : 1;
+                        var utxo_id = "s_" + tapscript.Tx.util.getTxid( tx0 ) + "_" + String( vout_for_display );
                         //TODO: ensure the utxo is marked unspendable til a few blocks after tx0 confirms
                         if ( i_have_change ) {
                             titanlib.server_info.utxos[ utxo_id ] = {txid: tapscript.Tx.util.getTxid( tx0 ), vout: make_connector ? 2 : 1, amnt: i_have_change, addy: bobs_address, priv: bobs_priv, utxo_id, unspendable_til: 5}
@@ -1214,8 +1262,10 @@
                         //recover your money and mark the user as blocked
                         //from sending and receiving
                         var loopTilPaid = async () => {
-                            var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, 6 );
+                            console.log( 'test19', 'checking if an invoice is paid...' );
+                            var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, titanlib.nwc_timeout );
                             if ( invoice_data.result.hasOwnProperty( "settled_at" ) && invoice_data.result.settled_at ) return invoice_data.result.preimage;
+                            console.log( 'test20', 'it is not paid' );
                             await titanlib.waitSomeTime( 1000 );
                             return loopTilPaid();
                         }
@@ -1224,7 +1274,9 @@
                             await titanlib.waitSomeTime( 300_000 );
                             return "time is up";
                         }
+                        console.log( 'test18', 'before I get my preimage, I am setting a 5 minute timer' );
                         var preimage = await Promise.any( [ timer(), loopTilPaid() ] );
+                        console.log( 'test21', 'got my preimage, now sending it to user:', preimage );
 
                         //send the preimage to the user
                         if ( preimage !== "time is up" ) {
@@ -1314,7 +1366,8 @@
                         var alices_pub = state.alices_pub;
                         var bobs_pub = state.bobs_pub;
                         var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
-                        var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
+                        var bobs_nostr_pub = state[ "server_nostr_pubkey" ];
+                        var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_nostr_pub ], titanlib.network );
                         var amount = message.msg_value.amount;
                         var pmthash = message.msg_value.pmthash;
                         var invoice = message.msg_value.invoice;
@@ -1347,7 +1400,7 @@
                             var nwc_info = nwcjs.nwc_infos.length ? nwcjs.nwc_infos[ 0 ] : nwcjs.processNWCstring( nwc_string );
                             nwcjs.tryToPayInvoice( nwc_info, invoice );
                             var loopTilPaid = async () => {
-                                var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, 6 );
+                                var invoice_data = await nwcjs.checkInvoice( nwc_info, invoice, titanlib.nwc_timeout );
                                 console.log( invoice_data );
                                 if ( invoice_data.result.hasOwnProperty( "settled_at" ) && invoice_data.result.settled_at ) return invoice_data.result.preimage;
                                 await titanlib.waitSomeTime( 1000 );
@@ -1419,10 +1472,10 @@
 
                                 //broadcast the cut_through tx
                                 cut_through_tx.vin[ 0 ].witness = [ bobs_sig_on_cut_through_tx, alices_sig_on_cut_through_tx, old_swap_scripts[ 0 ], old_swap_cblock ];
-                                console.log( 'broadcast this:' );
+                                titanlib.pushBTCpmt( tapscript.Tx.encode( cut_through_tx ).hex, titanlib.blockchain );
+                                console.log( 'broadcast this cut_through_tx:' );
                                 console.log( tapscript.Tx.encode( cut_through_tx ).hex );
                                 state.blocked_from_sending = false;
-                                alert( 'broadcast the tx in your console' );
                             }
                         } else {
                             var skip_cut_through = true;
@@ -1452,10 +1505,13 @@
 
                             var funding_txhex = tapscript.Tx.encode( funding_tx ).hex;
                             var sweep_txhex = tapscript.Tx.encode( sweep_tx ).hex;
-                            console.log( 'broadcast this:' );
+                            console.log( 'broadcast this funding_tx:' );
                             console.log( funding_txhex );
                             console.log( 'and this:' );
                             console.log( sweep_txhex );
+                            titanlib.pushBTCpmt( funding_txhex, titanlib.blockchain );
+                            await titanlib.waitSomeTime( 5_000 );
+                            titanlib.pushBTCpmt( sweep_txhex, titanlib.blockchain );
                         }
                     }
                     if ( message.msg_type === "exit" ) {
@@ -1472,7 +1528,8 @@
                         var alices_pub = state.alices_pub;
                         var bobs_pub = state.bobs_pub;
                         var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
-                        var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
+                        var bobs_nostr_pub = state[ "server_nostr_pubkey" ];
+                        var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_nostr_pub ], titanlib.network );
                         var multisig_scripts = [ [ alices_pub, "OP_CHECKSIGVERIFY", bobs_pub, "OP_CHECKSIG" ] ];
                         var [ multisig_addy, multisig_tree, multisig_cblock ] = titanlib.getAddressData( multisig_scripts, 0 );
                         var connector_txid = state.connector_txid;
@@ -1525,7 +1582,7 @@
             },
             getBalance: state_id => titanlib.state[ state_id ].utxos[ 0 ].amount,
             getUTXOs: async ( privkey, network ) => {
-                var url_half = `https://mempool.space/${network}`;
+                var url_half = `https://${titanlib.explorer}/${network}`;
                 if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
                 var pubkey = nobleSecp256k1.getPublicKey( privkey, true ).substring( 2 );
                 var address = tapscript.Address.fromScriptPubKey( [ 1, pubkey ], "testnet" );
@@ -1544,11 +1601,38 @@
                 return( obj );
             },
             pushBTCpmt: async ( rawtx, network ) => {
-                var url_half = `https://mempool.space/${network}`;
+                var url_half = `https://${titanlib.explorer}/${network}`;
                 if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
                 var response = await fetch( url_half + "api/tx", {method: "POST", body: rawtx});
                 var txid = await response.text();
                 return txid;
+            },
+            watchForTxid: async ( txid, network, started_watching ) => {
+                var now = Math.floor( Date.now() / 1000 );
+                if ( started_watching && now - started_watching > 30 ) return "not yet";
+                await titanlib.waitSomeTime( 6_000 );
+                var url_half = `https://${titanlib.explorer}/${network}`;
+                if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
+                var response = await fetch( url_half + "api/tx/" + txid );
+                if ( !started_watching ) started_watching = Math.floor( Date.now() / 1000 ) - 6;
+                if ( !response.ok ) return titanlib.watchForTxid( txid, network, started_watching );
+            },
+            watchtower: async state_id => {
+                var state = titanlib.state[ state_id ];
+                Object.keys( state.watchtower ).forEach( async txid => {
+                    var tx_was_broadcast = await titanlib.watchForTxid( txid, titanlib.blockchain );
+                    if ( tx_was_broadcast === "not yet" ) {
+                        //TODO: check to see if this txid should be removed from the watchtower; if so, remove it and then return, otherwise just return; note that I can check to see if this txid should be removed from the watchtower by verifying whether output 0 of its removal_txid got spent; 6 blocks later, I can stop watching for this txid
+                        return;
+                    }
+                    var what_to_do = state.watchtower[ txid ][ "what_to_do" ];
+                    if ( what_to_do === "sweep_the_swap_output_or_grab_its_preimage" ) {
+                        //TODO: create a tx using my_sweep_data to construct the input and alices_address as an output; (2) broadcast the resulting tx when the swap addy's timelock expires; (3) watch for bob to broadcast his own sweep tx; (4) if that happens, grab the preimage and treat it as a proof of payment
+                    }
+                    if ( what_to_do === "exit_unilaterally" ) titanlib.exitUnilaterally( state_id, true );
+                });
+                await titanlib.waitSomeTime( 30_000 );
+                titanlib.watchtower( state_id );
             },
             // runTests: async () => {
             //     var nprofile = await titanlib.runServer();
@@ -2678,7 +2762,8 @@
             var alices_pub = state.alices_pub;
             var bobs_pub = state.bobs_pub;
             var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
-            var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
+            var bobs_nostr_pub = state[ "server_nostr_pubkey" ];
+            var bobs_address = tapscript.Address.fromScriptPubKey( [ 1, bobs_nostr_pub ], titanlib.network );
             var multisig_scripts = [ [ alices_pub, "OP_CHECKSIGVERIFY", bobs_pub, "OP_CHECKSIG" ] ];
             var [ multisig_addy, multisig_tree, multisig_cblock ] = titanlib.getAddressData( multisig_scripts, 0 );
             var connector_txid = state.connector_txid;
@@ -2742,8 +2827,10 @@
             exit_tx.vin[ 0 ].witness = [ bobs_sig_on_exit_tx, alices_sig_1, old_swap_scripts[ 0 ], old_swap_cblock ];
             exit_tx.vin[ 1 ].witness = [ alices_sig_2 ];
             var txhex = tapscript.Tx.encode( exit_tx ).hex;
-            console.log( 'broadcast this:' );
+            console.log( 'broadcast this exit_tx:' );
             console.log( txhex );
+            titanlib.pushBTCpmt( txhex, titanlib.blockchain );
+            await titanlib.waitSomeTime( 2_000 );
             alert( `broadcast the tx in your console and you are done` );
 
             localStorage.removeItem( "brick_wallet_state" );
@@ -2965,7 +3052,7 @@
             if ( localStorage[ "titan_wallet_state" ] ) titanlib.state = JSON.parse( localStorage[ "titan_wallet_state" ] );
             var walletSaver = async () => {
                 if ( stop_the_save ) {
-                    window.location.reload();
+                    // window.location.reload();
                     return;
                 } else {
                     localStorage[ "titan_server_info" ] = JSON.stringify( titanlib.server_info );
@@ -2988,11 +3075,13 @@
                     var nostr_privkey = titanlib.server_info[ "nostr_privkey" ];
                     var nostr_pubkey = titanlib.server_info[ "nostr_pubkey" ];
                     var deposit_addy = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
-                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to recover your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Balance deposited:</p><p><span class="server_balance">0</span> sats</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                    $( 'body' ).style = "word-wrap: break-word;";
+                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p>${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to recover your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Balance:</p><p><span class="server_balance">0</span> sats</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
                     var balanceLoop = async () => {
                         var utxos = await titanlib.getUTXOs( nostr_privkey, titanlib.blockchain );
+                        titanlib.server_info.utxos = {}
                         utxos.forEach( utxo => {
-                            var utxo_id = utxo.txid + "_" + String( utxo.vout );
+                            var utxo_id = "s_" + utxo.txid + "_" + String( utxo.vout );
                             titanlib.server_info.utxos[ utxo_id ] = {
                                 utxo_id,
                                 ...utxo,
@@ -3015,15 +3104,15 @@
                 titanlib.runServer();
                 $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p style="word-wrap: break-word;">${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to recover your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Balance deposited:</p><p><span class="server_balance">0</span> sats</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
                 var balanceLoop = async () => {
-                    var utxo_id = titanlib.getPrivkey().substring( 0, 16 );
-                    titanlib.server_info.utxos[ utxo_id ] = {
-                        txid: "a".repeat( 64 ),
-                        vout: 0,
-                        amnt: 100_000,
-                        addy: deposit_addy,
-                        priv: nostr_privkey,
-                        utxo_id,
-                    }
+                    var utxos = await titanlib.getUTXOs( nostr_privkey, titanlib.blockchain );
+                    titanlib.server_info.utxos = {}
+                    utxos.forEach( utxo => {
+                        var utxo_id = "s_" + utxo.txid + "_" + String( utxo.vout );
+                        titanlib.server_info.utxos[ utxo_id ] = {
+                            utxo_id,
+                            ...utxo,
+                        }
+                    });
                     var bal = 0;
                     Object.keys( titanlib.server_info.utxos ).forEach( item => bal = bal + titanlib.server_info.utxos[ item ].amnt );
                     $( '.server_balance' ).innerText = bal.toLocaleString();
@@ -3077,6 +3166,8 @@
                 });
                 if ( state_exists ) {
                     titanlib.init();
+                    var state_id = Object.keys( titanlib.state )[ 0 ];
+                    titanlib.watchtower( state_id );
                     brick_wallet.init();
                     modalVanish();
                     return;
