@@ -259,6 +259,7 @@
                 var alices_utxo = state.utxos[ 0 ];
                 //TODO: get the actual txfee from the mempool
                 var txfee = 500;
+                var txfee_rate = 1;
 
                 //enter what amount you want to receive
                 if ( !amount ) amount = Number( prompt( `enter the amount of sats you want to send` ) );
@@ -276,7 +277,7 @@
                 }
 
                 //get swap data
-                var txs = titanlib.getSendTxData( state_id, amount, pmthash, alices_utxo, txfee );
+                var txs = titanlib.getSendTxData( state_id, amount, pmthash, alices_utxo, txfee, txfee_rate );
                 var { funding_tx, cut_through_tx, alices_new_exit_tx, swap_scripts, swap_addy, swap_tree, swap_cblock, multisig_scripts, multisig_addy, multisig_tree, multisig_cblock } = txs;
 
                 //sign the funding tx and the cut_through tx
@@ -294,6 +295,7 @@
                         amount,
                         pmthash,
                         txfee,
+                        txfee_rate,
                         alices_sig_on_funding_tx,
                         invoice,
                     },
@@ -406,10 +408,13 @@
                     preimage: "a".repeat( 64 ),
                     alices_utxo,
                     txfee,
+                    txfee_rate,
                 });
 
+                var old_balance = alices_utxo.amount + 330;
+                var new_balance = cut_through_tx.vout[ 1 ].value + 330;
                 var preimage = preimage_provided;
-                var fees_paid = txfee;
+                var fees_paid = old_balance - amount - new_balance;
                 var txid = tapscript.Tx.util.getTxid( cut_through_tx );
                 return [ preimage, fees_paid, txid ];
             },
@@ -451,7 +456,6 @@
                 // var message = JSON.parse( prompt( `send the message in your console to your counterparty and enter their reply` ) );
 
                 //process the reply
-                //TODO: actually extract the pmthash
                 if ( message.msg_value.hasOwnProperty( "error" ) ) {
                     showModal( `aborting because you got this error message: ${JSON.stringify( message.msg_value.error )}` );
                     return alert( `aborting because you got this error message: ${JSON.stringify( message.msg_value.error )}` );
@@ -463,7 +467,7 @@
                 }
                 var pmthash = brick_wallet.getInvoicePmthash( invoice );
                 //TODO: ensure the txfee is reasonable based on what the mempool says
-                var { bobs_sig_on_tx3, bobs_sig_on_tx4, utxos, txfee } = message.msg_value;
+                var { bobs_sig_on_tx3, bobs_sig_on_tx4, utxos, txfee, txfee_rate } = message.msg_value;
 
                 //TODO: validate the utxos
 
@@ -485,8 +489,8 @@
                 if ( make_connector ) amnt_for_swap_addy = amnt_for_swap_addy - 330;
 
                 //get the transactions that need to be signed
-                var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos, make_connector, txfee );
-                var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
+                var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos, make_connector, txfee, txfee_rate );
+                var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock, new_txfee } = txs;
                 if ( make_connector ) {
                     var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
                     var connector_tx = tapscript.Tx.create({
@@ -551,12 +555,12 @@
 
                 var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
                 var tx1_txid = tapscript.Tx.util.getTxid( tx1 );
-                titanlib.receiveLN( state_id, tx0_txid, tx1_txid, swap_addy, amnt_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee );
-
                 var txid = tx0_txid;
-                return [ invoice, txid, txfee ];
+                titanlib.receiveLN( state_id, tx0_txid, tx1_txid, swap_addy, amnt_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, new_txfee, txfee_rate, tx0 );
+
+                return [ invoice, txid, new_txfee ];
             },
-            receiveLN: async ( state_id, tx0_txid, tx1_txid, swap_addy, amnt_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee ) => {
+            receiveLN: async ( state_id, tx0_txid, tx1_txid, swap_addy, amnt_for_swap_addy, bobs_sig_on_tx3, bobs_sig_on_tx4, make_connector, utxos, pmthash, invoice, txid, txfee, txfee_rate, tx0 ) => {
                 var state = titanlib.state[ state_id ];
                 var setListener = async () => {
                     var message = await titanlib.listenForReply( `preimage_${pmthash}` );
@@ -603,7 +607,7 @@
                     txid: tx0_txid,
                     vout: 0,
                     addy: swap_addy,
-                    amount: amnt_for_swap_addy,
+                    amount: Number( tx0.vout[ 0 ].value ),
                     bobs_sig_on_tx3,
                     bobs_sig_on_tx4,
                     pmthash,
@@ -611,6 +615,7 @@
                     make_connector,
                     utxos,
                     txfee,
+                    txfee_rate,
                 });
 
                 brick_wallet.processInvoice( invoice, txid, txfee * 1000 );
@@ -630,19 +635,17 @@
 
                 if ( utxo_to_withdraw.hasOwnProperty( "alices_utxo" ) ) {
                     //we are withdrawing a utxo received after a tx we sent, which has a unique procedure
-                    var { amount, pmthash, alices_utxo, txfee } = utxo_to_withdraw;
-                    var txs = titanlib.getSendTxData( state_id, amount, pmthash, alices_utxo, txfee );
+                    var { amount, pmthash, alices_utxo, txfee, txfee_rate } = utxo_to_withdraw;
+                    var txs = titanlib.getSendTxData( state_id, amount, pmthash, alices_utxo, txfee, txfee_rate );
                     var { funding_tx, cut_through_tx, alices_new_exit_tx, swap_scripts, swap_addy, swap_tree, swap_cblock, multisig_scripts, multisig_addy, multisig_tree, multisig_cblock } = txs;
                     var bobs_sig_on_new_exit_tx = utxo_to_withdraw.bobs_sig_on_new_exit_tx;
 
                     //get money to pay for mining fees
-                    console.log( 'now we will test unilateral withdrawal. For that, we need to deposit enough coins to pay for two v3 transactions, so we need 1000 sats. Deposit that here:' );
                     var addy = alices_address;
-                    console.log( `send 1500 or more sats to this address:` );
-                    console.log( addy );
-                    var txid = prompt( `send 1500 or more sats to the address in your console and enter the txid` );
-                    var vout = Number( prompt( `and the vout` ) );
-                    var amnt = Number( prompt( `and the amnt` ) );
+                    //TODO: find out how big exit_tx_1, exit_tx_2, and alices_new_exit_tx are, multiply each one by the feerate from the mempool, and request the resulting amount
+                    var txid = "a".repeat( 64 );
+                    var vout = 0;
+                    var amnt = 1500;
 
                     //create the needed exit txs
                     var connector_prev = state.connector_prev;
@@ -657,8 +660,6 @@
                         ],
                     });
                     var connector_txid = tapscript.Tx.util.getTxid( exit_tx_1 );
-                    //TODO: get the actual txfee from the mempool
-                    var txfee = 500;
                     var exit_tx_2 = tapscript.Tx.create({
                         version: 3,
                         vin: [
@@ -669,12 +670,49 @@
                             titanlib.getVout( amnt - txfee, addy ),
                         ],
                     });
+
+                    //pretend to add a new vin to alices_new_exit_tx to better estimate the cost of broadcast
+                    alices_new_exit_tx.vin.push( titanlib.getVin( "a".repeat( 64 ), 0, exit_tx_2.vout[ 0 ], addy ) );
+
+                    //calculate better fee estimates
+                    //TODO: get the actual txfee_rate from the mempool
+                    var txfee_rate = 1;
+                    exit_tx_1.vin[ 0 ].witness = [ "ab".repeat( 64 ) ];
+                    var vsize_1 = tapscript.Tx.util.getTxSize( exit_tx_1 ).vsize;
+                    var new_txfee_1 = vsize_1 * txfee_rate;
+                    exit_tx_1.vin[ 0 ].witness = [];
+                    exit_tx_2.vin[ 0 ].witness = [ "ab".repeat( 64 ) ];
+                    var vsize_2 = tapscript.Tx.util.getTxSize( exit_tx_2 ).vsize;
+                    var new_txfee_2 = vsize_2 * txfee_rate;
+                    exit_tx_2.vout[ 0 ].value = amnt - new_txfee_2;
+                    exit_tx_2.vin[ 0 ].witness = [];
+                    alices_new_exit_tx.vin[ alices_new_exit_tx.vin.length - 1 ].witness = [ "ab".repeat( 64 ) ];
+                    var vsize_3 = tapscript.Tx.util.getTxSize( alices_new_exit_tx ).vsize;
+                    var new_txfee_3 = vsize_3 * txfee_rate;
+                    alices_new_exit_tx.vin.pop();
+
+                    //get enough sats to pay for the unilateral exit txs
+                    console.log( `now we will do a unilateral withdrawal. For that, we need to deposit enough coins to pay for two v3 transactions, so we need ${new_txfee_1 + new_txfee_2 + new_txfee_3} sats. Deposit that here:` );
+                    console.log( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3} or more sats to this address:` );
+                    console.log( addy );
+                    var txid = prompt( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3} or more sats to the address in your console and enter the txid` );
+                    var vout = Number( prompt( `and the vout` ) );
+                    var amnt = Number( prompt( `and the amnt` ) );
+
+                    //modify the exit txs to add your fee-paying utxos
+                    exit_tx_2.vin[ 0 ].txid = txid;
+                    exit_tx_2.vin[ 0 ].vout = vout;
+                    exit_tx_2.vin[ 0 ].prevout.value = amnt;
+                    exit_tx_2.vout[ 0 ].value = amnt - new_txfee_1 - new_txfee_2;
                     var exit_tx_2_txid = tapscript.Tx.util.getTxid( exit_tx_2 );
+                    alices_new_exit_tx.vin.length = 1;
+                    alices_new_exit_tx.vin.push( titanlib.getVin( exit_tx_2_txid, 0, exit_tx_2.vout[ 0 ].value, addy ) );
 
-                    //modify the exit tx to add your fee-paying utxo
-                    alices_new_exit_tx.vin.push( titanlib.getVin( exit_tx_2_txid, 0, amnt - txfee, addy ) );
-
-                    //sign the exit tx
+                    //sign the exit txs
+                    var alices_sig_on_exit_tx_1 = tapscript.Signer.taproot.sign( alices_priv, exit_tx_1, 0 );
+                    exit_tx_1.vin[ 0 ].witness = [ alices_sig_on_exit_tx_1 ];
+                    var alices_sig_on_exit_tx_2 = tapscript.Signer.taproot.sign( alices_priv, exit_tx_2, 0 );
+                    exit_tx_2.vin[ 0 ].witness = [ alices_sig_on_exit_tx_2 ];
                     var alices_sig_on_new_exit_tx = tapscript.Signer.taproot.sign( alices_priv, alices_new_exit_tx, 0, {extension: multisig_tree[ 0 ]} ).hex;
                     alices_new_exit_tx.vin[ 0 ].witness = [ bobs_sig_on_new_exit_tx, alices_sig_on_new_exit_tx, multisig_scripts[ 0 ], multisig_cblock ];
                     var alices_second_sig_on_new_exit_tx = tapscript.Signer.taproot.sign( alices_priv, alices_new_exit_tx, 1 ).hex;
@@ -695,24 +733,46 @@
                 } else {
                     //get the txs you need to exit
                     //note that the txfee referenced below is the one used when tx0 was created
-                    var { amount, bobs_sig_on_tx3, bobs_sig_on_tx4, preimage, make_connector, utxos, txfee } = utxo_to_withdraw;
+                    var { amount, bobs_sig_on_tx3, bobs_sig_on_tx4, preimage, make_connector, utxos, txfee, txfee_rate } = utxo_to_withdraw;
                     var pmthash = await titanlib.sha256( titanlib.hexToBytes( preimage ) );
-                    var txs = titanlib.getReceiveTxData( state_id, amount, pmthash, utxos, make_connector, txfee );
+                    var txs = titanlib.getReceiveTxData( state_id, amount, pmthash, utxos, make_connector, txfee, txfee_rate );
                     var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
                     var tx1_txid = tapscript.Tx.util.getTxid( tx1 );
 
                     if ( tx1_was_broadcasted ) {
-                        //get money to pay for mining fees
-                        console.log( 'now we will test unilateral withdrawal. For that, we need to deposit enough coins to pay for one v3 transaction, so we need 1000 sats. Deposit that here:' );
                         var addy = alices_address;
-                        console.log( `send 1000 or more sats to this address:` );
-                        console.log( addy );
-                        var txid = prompt( `send 1000 or more sats to the address in your console and enter the txid` );
-                        var vout = Number( prompt( `and the vout` ) );
-                        var amnt = Number( prompt( `and the amnt` ) );
+                        var txid = "a".repeat( 64 );
+                        var vout = 0;
+                        var amnt = 1000;
 
                         //modify tx4 to add your connector and fee-paying utxo as inputs, and increase the output value
                         tx4.vin.push( titanlib.getVin( state.connector_prev, 1, 330, alices_address ) );
+                        tx4.vin.push( titanlib.getVin( txid, vout, amnt, addy ) );
+                        tx4.vout[ 0 ].value = tx4.vout[ 0 ].value + 330;
+
+                        //calculate a better feerate
+                        //TODO: get the actual feerate from the mempool
+                        var txfee_rate = 1;
+                        tx4.vin[ 0 ].witness = [ "ab".repeat( 65 ), "ab".repeat( 64 ), swap_scripts[ 1 ], swap_cblock ];
+                        tx4.vin[ 1 ].witness = [ "ab".repeat( 64 ) ];
+                        tx4.vin[ 2 ].witness = [ "ab".repeat( 64 ) ];
+                        var vsize = tapscript.Tx.util.getTxSize( tx4 ).vsize;
+                        var new_txfee = vsize * txfee_rate;
+                        tx4.vin[ 0 ].witness = [];
+                        tx4.vin[ 1 ].witness = [];
+                        tx4.vin[ 2 ].witness = [];
+
+                        //get money to pay for mining fees
+                        console.log( `now we will do a unilateral withdrawal. For that, we need to deposit enough coins to pay for one v3 transaction, so we need ${new_txfee} sats. Deposit that here:` );
+                        //TODO: find out how big tx4 is, multiply that by the feerate from the mempool, and request the resulting amount
+                        console.log( `send ${new_txfee} or more sats to this address:` );
+                        console.log( addy );
+                        var txid = prompt( `send ${new_txfee} or more sats to the address in your console and enter the txid` );
+                        var vout = Number( prompt( `and the vout` ) );
+                        var amnt = Number( prompt( `and the amnt` ) );
+
+                        //modify tx4 to match the new amount
+                        tx4.length = 2;
                         tx4.vin.push( titanlib.getVin( txid, vout, amnt, addy ) );
                         tx4.vout[ 0 ].value = tx4.vout[ 0 ].value + 330;
 
@@ -732,14 +792,10 @@
                         alert( 'broadcast the tx in your console' );
                         return;
                     } else {
-                        //get money to pay for mining fees
-                        console.log( 'now we will test unilateral withdrawal. For that, we need to deposit enough coins to pay for two v3 transactions, so we need 1000 sats. Deposit that here:' );
                         var addy = alices_address;
-                        console.log( `send 1000 or more sats to this address:` );
-                        console.log( addy );
-                        var txid = prompt( `send 1000 or more sats to the address in your console and enter the txid` );
-                        var vout = Number( prompt( `and the vout` ) );
-                        var amnt = Number( prompt( `and the amnt` ) );
+                        var txid = "a".repeat( 64 );
+                        var vout = 0;
+                        var amnt = 2000;
 
                         //create the needed exit txs
                         var connector_prev = state.connector_prev;
@@ -754,8 +810,7 @@
                             ],
                         });
                         var connector_txid = tapscript.Tx.util.getTxid( exit_tx_1 );
-                        //TODO: get the actual txfee from the mempool
-                        var txfee = 500;
+                        var fake_txfee = 500;
                         var exit_tx_2 = tapscript.Tx.create({
                             version: 3,
                             vin: [
@@ -763,7 +818,7 @@
                                 titanlib.getVin( connector_txid, 1, 0, "51024e73" ),
                             ],
                             vout: [
-                                titanlib.getVout( amnt - txfee, addy ),
+                                titanlib.getVout( amnt - fake_txfee, addy ),
                             ],
                         });
                         var exit_tx_2_txid = tapscript.Tx.util.getTxid( exit_tx_2 );
@@ -771,13 +826,51 @@
                         var exit_tx_3 = tapscript.Tx.create({
                             version: 3,
                             vin: [
-                                titanlib.getVin( exit_tx_2_txid, 0, amnt - txfee, addy ),
+                                titanlib.getVin( exit_tx_2_txid, 0, exit_tx_2.vout[ 0 ].value, addy ),
                                 titanlib.getVin( tx3_txid, 1, 0, "51024e73" ),
                             ],
                             vout: [
                                 [ "OP_RETURN", "" ]
                             ],
                         });
+
+                        //calculate better fee estimates
+                        //TODO: get the actual txfee_rate from the mempool
+                        var txfee_rate = 1;
+                        exit_tx_1.vin[ 0 ].witness = [ "ab".repeat( 64 ) ];
+                        var vsize_1 = tapscript.Tx.util.getTxSize( exit_tx_1 ).vsize;
+                        var new_txfee_1 = vsize_1 * txfee_rate;
+                        exit_tx_1.vin[ 0 ].witness = [];
+                        exit_tx_2.vin[ 0 ].witness = [ "ab".repeat( 64 ) ];
+                        var vsize_2 = tapscript.Tx.util.getTxSize( exit_tx_2 ).vsize;
+                        var new_txfee_2 = vsize_2 * txfee_rate;
+                        exit_tx_2.vout[ 0 ].value = amnt - new_txfee_2;
+                        exit_tx_2.vin[ 0 ].witness = [];
+                        exit_tx_3.vin[ 0 ].witness = [ "ab".repeat( 64 ) ];
+                        var vsize_3 = tapscript.Tx.util.getTxSize( exit_tx_3 ).vsize;
+                        var new_txfee_3 = vsize_3 * txfee_rate;
+                        exit_tx_3.vin[ 0 ].witness = [];
+                        tx3.vin[ 0 ].witness = [ "ab".repeat( 65 ), "ab".repeat( 64 ), preimage, swap_scripts[ 1 ], swap_cblock ];
+                        var vsize_4 = tapscript.Tx.util.getTxSize( tx3 ).vsize;
+                        var new_txfee_4 = vsize_4 * txfee_rate;
+                        tx3.vin[ 0 ].witness = [];
+
+                        //get money to pay for mining fees
+                        console.log( `now we will test unilateral withdrawal. For that, we need to deposit enough coins to pay for four transactions, so we need ${new_txfee_1 + new_txfee_2 + new_txfee_3 + new_txfee_4} sats. Deposit that here:` );
+                        //TODO: find out how big tx1 and tx2 are, multiply each one by the feerate from the mempool, sum the two values, and request the resulting amount
+                        console.log( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3 + new_txfee_4} or more sats to this address:` );
+                        console.log( addy );
+                        var txid = prompt( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3 + new_txfee_4} or more sats to the address in your console and enter the txid` );
+                        var vout = Number( prompt( `and the vout` ) );
+                        var amnt = Number( prompt( `and the amnt` ) );
+
+                        //modify the exit txs to add your fee-paying utxos
+                        exit_tx_2.vin[ 0 ].txid = txid;
+                        exit_tx_2.vin[ 0 ].vout = vout;
+                        exit_tx_2.vin[ 0 ].prevout.value = amnt;
+                        exit_tx_2.vout[ 0 ].value = amnt - new_txfee_1 - new_txfee_2;
+                        var exit_tx_2_txid = tapscript.Tx.util.getTxid( exit_tx_2 );
+                        exit_tx_3.vin.push( titanlib.getVin( exit_tx_2_txid, 0, exit_tx_2.vout[ 0 ].value, addy ) );
 
                         //sign the first two exit txs, tx3, and exit_tx_4
                         var sig_for_exit_1 = tapscript.Signer.taproot.sign( alices_priv, exit_tx_1, 0 );
@@ -805,7 +898,7 @@
                     }
                 }
             },
-            getSendTxData: ( state_id, amount, pmthash, alices_utxo, txfee ) => {
+            getSendTxData: ( state_id, amount, pmthash, alices_utxo, txfee, txfee_rate ) => {
                 //prepare requisite variables
                 var state = titanlib.state[ state_id ];
                 var alices_pub = state.alices_pub;
@@ -831,6 +924,25 @@
                     ],
                 });
 
+                //calculate a better fee estimate
+                funding_tx.vin[ 0 ].witness = [
+                    //add a 65 byte sig to the first input
+                    "ab".repeat( 65 ),
+                    //and a 64 byte sig
+                    "ab".repeat( 64 ),
+                    //and a 68 byte script
+                    "ab".repeat( 68 ),
+                    //and a 33 byte cblock if Alice sent last, otherwise add a 65 byte cblock
+                    alices_utxo.hasOwnProperty( "alices_utxo" ) ? "ab".repeat( 33 ) : "ab".repeat( 65 ),
+                ];
+                //add a 64 byte sig to the second input
+                funding_tx.vin[ 1 ].witness = [ "ab".repeat( 64 ) ];
+                var vsize = tapscript.Tx.util.getTxSize( funding_tx ).vsize;
+                var new_txfee = vsize * txfee_rate;
+                funding_tx.vout[ 1 ].value = alices_utxo.amount + 330 - amount - new_txfee;
+                funding_tx.vin[ 0 ].witness = [];
+                funding_tx.vin[ 1 ].witness = [];
+
                 //prepare cut through tx
                 var cut_through_tx = tapscript.Tx.create({
                     vin: [
@@ -841,6 +953,22 @@
                         titanlib.getVout( alices_utxo.amount - amount - txfee, multisig_addy ),
                     ],
                 });
+
+                //calculate a better fee estimate
+                cut_through_tx.vin[ 0 ].witness = [
+                    //add a 65 byte sig to the first input
+                    "ab".repeat( 65 ),
+                    //and a 64 byte sig
+                    "ab".repeat( 64 ),
+                    //and a 68 byte script
+                    "ab".repeat( 68 ),
+                    //and a 33 byte cblock if Alice sent last, otherwise add a 65 byte cblock
+                    alices_utxo.hasOwnProperty( "alices_utxo" ) ? "ab".repeat( 33 ) : "ab".repeat( 65 ),
+                ]
+                var vsize = tapscript.Tx.util.getTxSize( cut_through_tx ).vsize;
+                var new_txfee = vsize * txfee_rate;
+                cut_through_tx.vout[ 1 ].value = alices_utxo.amount - amount - new_txfee;
+                cut_through_tx.vin[ 0 ].witness = [];
 
                 //prepare alice's new exit tx
                 var alices_new_exit_tx = tapscript.Tx.create({
@@ -859,7 +987,7 @@
 
                 return { funding_tx, cut_through_tx, alices_new_exit_tx, swap_scripts, swap_addy, swap_tree, swap_cblock, multisig_scripts, multisig_addy, multisig_tree, multisig_cblock };
             },
-            getReceiveTxData: ( state_id, amount, pmthash, utxos, make_connector, txfee ) => {
+            getReceiveTxData: ( state_id, amount, pmthash, utxos, make_connector, txfee, txfee_rate ) => {
                 //prepare requisite variables
                 var state = titanlib.state[ state_id ];
                 var alices_pub = state.alices_pub;
@@ -890,13 +1018,47 @@
                     amnt_for_change_addy = amnt_for_change_addy - 330;
                 }
                 vout.unshift( titanlib.getVout( amount, swap_addy ) );
-                if ( amnt_for_change_addy - amount > 330 ) vout.push( titanlib.getVout( amnt_for_change_addy - amount, bobs_address ) );
+                var change_needed = false;
+                if ( amnt_for_change_addy - amount > 330 ) {
+                    change_needed = true;
+                    vout.push( titanlib.getVout( amnt_for_change_addy - amount, bobs_address ) );
+                }
 
                 //prepare tx0
                 var tx0 = tapscript.Tx.create({
                     vin,
                     vout,
                 });
+
+                //calculate a better fee estimate
+                tx0.vin.forEach( item => item.witness = [ "ab".repeat( 64 ) ] );
+                if ( state.utxos.length ) {
+                    var alices_utxo = state.utxos[ 0 ];
+                    tx0.vin[ tx0.vin.length - 1 ].witness = [
+                        //add a 65 byte sig to the first input
+                        "ab".repeat( 65 ),
+                        //and a 64 byte sig
+                        "ab".repeat( 64 ),
+                        //and a 68 byte script
+                        "ab".repeat( 68 ),
+                        //and a 33 byte cblock if Alice sent last, otherwise add a 65 byte cblock
+                        alices_utxo.hasOwnProperty( "alices_utxo" ) ? "ab".repeat( 33 ) : "ab".repeat( 65 ),
+                    ];
+                }
+                var vsize = tapscript.Tx.util.getTxSize( tx0 ).vsize;
+                var new_txfee = vsize * txfee_rate;
+                if ( change_needed ) tx0.vout[ make_connector ? 2 : 1 ].value = sum - amount - new_txfee;
+                if ( change_needed && make_connector ) tx0.vout[ 2 ].value = sum - 330 - amount - new_txfee;
+                if ( change_needed && sum - 330 - amount - new_txfee < 330 ) tx0.vout.length = tx0.vout.length - 1;
+                tx0.vin[ 0 ].witness = [];
+                if ( tx0.vin[ 1 ] ) tx0.vin[ 1 ].witness = [];
+
+                //calculate the difference between the expected feerate and the actual feerate
+                var difference = Math.abs( new_txfee - txfee );
+
+                //correct the output values of tx0
+                tx0.vout[ 0 ].value = tx0.vout[ 0 ].value + difference;
+                if ( change_needed ) tx0.vout[ make_connector ? 2 : 1 ].value = tx0.vout[ make_connector ? 2 : 1 ].value - difference;
 
                 //prepare tx1
                 var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
@@ -962,7 +1124,7 @@
                     ],
                 });
 
-                return { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock };
+                return { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock, new_txfee };
             },
             processMessage: async ( message, counterparty, server_nostr_pubkey ) => {
                 if ( !message ) message = JSON.parse( prompt( `enter the message from your counterparty` ) );
@@ -1028,7 +1190,9 @@
                         var alices_utxo = state.utxos[ 0 ];
                         if ( make_connector ) amount_to_find_utxos_for = amount_to_find_utxos_for + 330;
                         //TODO: get the actual txfee from the mempool
-                        var txfee = 1000;
+                        //assume, for now, that the size of tx0 will be 1000 bytes
+                        var txfee_rate = 1;
+                        var txfee = 1000 * txfee_rate;
                         amount_to_find_utxos_for = amount_to_find_utxos_for + txfee;
                         var sum_of_users_existing_utxos = 0;
                         state.utxos.forEach( utxo => sum_of_users_existing_utxos = sum_of_users_existing_utxos + utxo.amount );
@@ -1134,8 +1298,10 @@
                         var pmthash = brick_wallet.getInvoicePmthash( invoice );
 
                         //get the transactions that need to be signed
-                        var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos_to_use, make_connector, txfee );
-                        var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock } = txs;
+                        var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos_to_use, make_connector, txfee, txfee_rate );
+                        var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock, new_txfee } = txs;
+
+                        //make the connector, if needed
                         if ( make_connector ) {
                             var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
                             var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
@@ -1165,6 +1331,7 @@
                                 invoice,
                                 utxos: utxos_to_show,
                                 txfee,
+                                txfee_rate,
                                 bobs_sig_on_tx3,
                                 bobs_sig_on_tx4,
                             },
@@ -1235,14 +1402,15 @@
                             txid: tapscript.Tx.util.getTxid( tx0 ),
                             vout: 0,
                             addy: swap_addy,
-                            amount: amnt_for_swap_addy,
+                            amount: Number( tx0.vout[ 0 ].value ),
                             alices_sig_on_tx1,
                             alices_sig_on_tx2,
                             pmthash,
                             preimage,
                             make_connector,
                             utxos: utxos_to_use,
-                            txfee,
+                            txfee: new_txfee,
+                            txfee_rate,
                         });
 
                         //save the server's utxo data
@@ -1305,6 +1473,7 @@
                         state.blocked_from_receiving = true;
                         state.blocked_from_sending = true;
                         var addy = tapscript.Address.fromScriptPubKey( [ 1, bobs_pub ], titanlib.network );
+                        //TODO: find out how big tx1 and tx2 are, multiply each one by the feerate from the mempool, and request the resulting amount
                         console.log( `send 1500 or more sats to this address:` );
                         console.log( addy );
                         var txid = prompt( `send 1500 or more sats to the address in your console and enter the txid` );
@@ -1313,7 +1482,6 @@
                         var priv = titanlib.server_info.nostr_privkey;
 
                         //create the needed exit txs
-                        //TODO: get the actual txfee from the mempool
                         var txfee = 500;
                         var tx1_txid = tapscript.Tx.util.getTxid( tx1 );
                         var exit_tx_1 = tapscript.Tx.create({
@@ -1328,8 +1496,17 @@
                                 titanlib.getVout( amnt - txfee - txfee, addy ),
                             ],
                         });
+
+                        //calculate a better fee estimate
+                        exit_tx_1.vin[ 1 ].witness = [ "ab".repeat( 64 ) ];
+                        var vsize = tapscript.Tx.util.getTxSize( exit_tx_1 ).vsize;
+                        var new_txfee = vsize * txfee_rate;
+                        exit_tx_1.vout[ 0 ].value = amnt - new_txfee;
+                        exit_tx_1.vin[ 0 ].witness = [];
+
+                        //modify tx2
                         var exit_tx_1_txid = tapscript.Tx.util.getTxid( exit_tx_1 );
-                        tx2.vin.push( titanlib.getVin( exit_tx_1_txid, 0, amnt - txfee - txfee, addy ) );
+                        tx2.vin.push( titanlib.getVin( exit_tx_1_txid, 0, exit_tx_1.vout[ 0 ].value, addy ) );
 
                         //sign tx1, exit_tx_1, and tx2
                         var [ _, _, swap_cblock ] = titanlib.getAddressData( swap_scripts, 0 );
@@ -1376,9 +1553,10 @@
                         var alices_utxo = state.utxos[ 0 ];
                         //TODO: use the mempool to check if the txfee is reasonable
                         var txfee = message.msg_value.txfee;
+                        var txfee_rate = message.msg_value.txfee_rate;
 
                         //get swap data
-                        var txs = titanlib.getSendTxData( state_id, amount, pmthash, alices_utxo, txfee );
+                        var txs = titanlib.getSendTxData( state_id, amount, pmthash, alices_utxo, txfee, txfee_rate );
                         var { funding_tx, cut_through_tx, alices_new_exit_tx, swap_scripts, swap_addy, swap_tree, swap_cblock, multisig_scripts, multisig_addy, multisig_tree, multisig_cblock } = txs;
 
                         //validate alice's sig
@@ -1469,9 +1647,14 @@
                                     preimage: "a".repeat( 64 ),
                                     alices_utxo,
                                     txfee,
+                                    txfee_rate,
                                 });
 
                                 //broadcast the cut_through tx
+                                if ( alices_utxo.hasOwnProperty( "alices_utxo" ) ) {
+                                    var multisig_scripts = [ [ alices_pub, "OP_CHECKSIGVERIFY", bobs_pub, "OP_CHECKSIG" ] ];
+                                    var [ _, _, old_swap_cblock ] = titanlib.getAddressData( multisig_scripts, 0 );
+                                }
                                 cut_through_tx.vin[ 0 ].witness = [ bobs_sig_on_cut_through_tx, alices_sig_on_cut_through_tx, old_swap_scripts[ 0 ], old_swap_cblock ];
                                 titanlib.pushBTCpmt( tapscript.Tx.encode( cut_through_tx ).hex, titanlib.blockchain );
                                 console.log( 'broadcast this cut_through_tx:' );
@@ -1535,7 +1718,7 @@
                         var [ multisig_addy, multisig_tree, multisig_cblock ] = titanlib.getAddressData( multisig_scripts, 0 );
                         var connector_txid = state.connector_txid;
                         var alices_utxo = state.utxos[ 0 ];
-                        //TODO: get the actual txfee from the mempool
+                        //note that it does not matter what Bob puts for the txfee here, as he signs with sighash_none
                         var txfee = 1000;
 
                         //prepare exit tx
@@ -2771,6 +2954,7 @@
             var alices_utxo = state.utxos[ 0 ];
             //TODO: get the actual txfee from the mempool
             var txfee = 1000;
+            var txfee_rate = 1;
 
             //prepare exit tx
             var exit_tx = tapscript.Tx.create({
@@ -2782,6 +2966,25 @@
                     titanlib.getVout( alices_utxo.amount + 330 - txfee, addy ),
                 ],
             });
+
+            //calculate a better fee estimate
+            exit_tx.vin[ 0 ].witness = [
+                //add a 65 byte sig to the first input
+                "ab".repeat( 65 ),
+                //and a 64 byte sig
+                "ab".repeat( 64 ),
+                //and a 68 byte script
+                "ab".repeat( 68 ),
+                //and a 33 byte cblock if Alice sent last, otherwise add a 65 byte cblock
+                alices_utxo.hasOwnProperty( "alices_utxo" ) ? "ab".repeat( 33 ) : "ab".repeat( 65 ),
+            ]
+            //add a 64 byte sig to the second input
+            exit_tx.vin[ 1 ].witness = [ "ab".repeat( 64 ) ];
+            var vsize = tapscript.Tx.util.getTxSize( exit_tx ).vsize;
+            var new_txfee = vsize * txfee_rate;
+            exit_tx.vout[ 0 ].value = alices_utxo.amount + 330 - new_txfee;
+            exit_tx.vin[ 0 ].witness = [];
+            exit_tx.vin[ 1 ].witness = [];
 
             //sign the exit tx
             var old_pmthash = await titanlib.sha256( titanlib.hexToBytes( alices_utxo.preimage ) );
@@ -3077,7 +3280,7 @@
                     var nostr_pubkey = titanlib.server_info[ "nostr_pubkey" ];
                     var deposit_addy = tapscript.Address.fromScriptPubKey( [ 1, nostr_pubkey ], titanlib.network );
                     $( 'body' ).style = "word-wrap: break-word;";
-                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p>${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p><p>Balance:</p><p><span class="server_balance">0</span> sats</p><hr>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to manage your funds:</p><p>https://supertestnet.github.io/faucet_generator/</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
+                    $( 'body' ).innerHTML = `<p>Thank you for running a papa swap server. Your nprofile is:</p><p>${server_nprofile}</p><p>Deposit funds here:</p><p class="deposit_addy"></p>${deposit_addy}<p><p>Balance:</p><p><span class="server_balance">0</span> sats</p><hr>This is your private key:</p><p class="nostr_privkey">${nostr_privkey}</p><p>You can use faucet_generator to manage your funds:</p><p>https://supertestnet.github.io/faucet_generator/#network=${titanlib.blockchain.substring( 0, titanlib.blockchain.length - 1 )}#privkey=${nostr_privkey}</p><p>Remember: this is for science only! If you put money on this server you are almost guaranteed to lose it. It's just demo code, not production ready.</p>`;
                     var balanceLoop = async () => {
                         var utxos = await titanlib.getUTXOs( nostr_privkey, titanlib.blockchain );
                         titanlib.server_info.utxos = {}
