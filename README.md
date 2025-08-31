@@ -92,6 +92,10 @@ After reaching this point, you might be questioning a choice of words I made. I 
 
 You're right. That is something bad, and it is also a trust assumption that applies to "regular" swap servers. But I think it is minor: papa swap fees will, hopefully, be very low, due to a kind of "race to the bottom." Anyone can run a papa swap server (it basically just requires some base layer bitcoin and a lightning wallet) so if anyone is charging high fees, someone else can spin up a server and take their business. So I hope that means no one can really get away with charging anything but basement rates. And thus your fee invoice will be low, and the "something bad" you found is just "a swap server can take a tiny little fee from you without providing you with service." But you're right, that is something bad. So I recommend not using a papa swap server if you doubt its trustworthiness, unless you're willing to lose a few sats for science's sake.
 
+# Comparison chart
+
+![](https://raw.githubusercontent.com/supertestnet/papa-swap/refs/heads/main/Submarine%20Swaps%20versus%20Papa%20Swaps.svg)
+
 # Why are these submarine swaps called Papa Swaps?
 
 The name Papa Swap comes from Papa Class, a group of Cold War submarines that included the world’s fastest declassified submarine – the Soviet K-222. As those are the fastest submarines, these are the fastest submarine swaps. Well, actually, now that I think about it, they are the *second* fastest. There is another type of swap used in some lightning wallets, called a "splice in," and it is sometimes safe to use a channel funded via a splice even before the splice transaction confirms. (The occasions when this is safe are probably outlined and explained in other documents about how splicing works, but I couldn't find any within 5 minutes of doing a quick google search; you try it and maybe you'll have better luck.) So splices are, at least sometimes, faster than papa swaps.
