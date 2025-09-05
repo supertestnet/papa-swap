@@ -173,8 +173,8 @@
                 if ( nwc_string ) {
                     var nostr_privkey = titanlib.getPrivkey();
                     var nostr_pubkey = titanlib.getPubkey( nostr_privkey );
-                    var relays = [ "ws://127.0.0.1:6969" ];
-                    // var relays = [ "wss://nostrue.com" ];
+                    // var relays = [ "ws://127.0.0.1:6969" ];
+                    var relays = [ "wss://nostrue.com" ];
                     titanlib.server_info[ "nostr_privkey" ] = nostr_privkey;
                     titanlib.server_info[ "nostr_pubkey" ] = nostr_pubkey;
                     titanlib.server_info[ "relays" ] = relays;
