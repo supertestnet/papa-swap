@@ -25,6 +25,7 @@
             am_server: false,
             listeners: {},
             nwc_timeout: 20,
+            watchtower_is_running: false,
             hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
             bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
             getPrivkey: () => titanlib.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ),
@@ -360,6 +361,7 @@
                     what_to_do: "sweep_the_swap_output_or_grab_its_preimage",
                     when_to_stop_watchtower: 6,
                     removal_txid: cut_through_txid,
+                    removal_addy: tapscript.Address.fromScriptPubKey( cut_through_tx.vout[ 0 ].scriptPubKey, titanlib.network ),
                     my_sweep_data: {
                         txid: funding_tx,
                         vout: 0,
@@ -367,11 +369,14 @@
                             value: amount,
                             addy: swap_addy,
                         },
+                        pmthash,
+                        swap_addy,
                         swap_scripts,
                         swap_tree,
                         swap_cblock,
                         //change the 2026 to 8 for testing purposes
-                        blocks_to_wait: 8,
+                        blocks_to_wait: 2026,
+                        feerate_i_ended_up_with: null,
                     },
                 }
 
@@ -388,19 +393,122 @@
                     return;
                 }
 
+                //get the txhex of the cut_through_tx
+                var url_half = `https://${titanlib.explorer}/${titanlib.blockchain}`;
+                if ( titanlib.blockchain === "mutinynet/" ) url_half = `https://mutinynet.com/`;
+                var cut_through_txhex = await fetch( `${url_half}api/tx/${cut_through_txid}/hex` );
+
                 //move your old utxo data to past utxos, if necessary
                 if ( state.utxos.length ) {
                     var past_utxo = JSON.parse( JSON.stringify( state.utxos[ 0 ] ) );
-                    //TODO: write a function that removes old utxo data 10 blocks after the confirmation of whatever txid is given in remove_when_this_tx_has_ten_confs
-                    past_utxo = { ...past_utxo, remove_when_this_tx_has_ten_confs: tapscript.Tx.util.getTxid( cut_through_tx ) };
-                    //TODO: set up a listener that watches to see if the server initiates a race condition by broadcasting the past utxo's version of tx1; if so, foil his attempt using the past utxo's version of tx4
+                    //remove old utxo data 10 blocks after the confirmation of the cut_through_tx
+                    state.watchtower[ cut_through_txid ] = {
+                        what_to_do: "remove_utxo_after_ten_confs",
+                        txid: past_utxo.txid,
+                        vout: past_utxo.vout,
+                    }
+                    //set up a listener that does the following: if the past utxo had a tx1, watch to see if the server initiates a race condition by broadcasting it; if so, foil his attempt using the past utxo's version of tx4, i.e. restore this past utxo and run titanlib.exitUnilaterally( state_id, true );
+                    if ( past_utxo.tx1_txid ) {
+                        state.watchtower[ past_utxo.tx1_txid ] = {
+                            what_to_do: "after_five_confs_restore_old_state_and_exit",
+                            txid: past_utxo.txid,
+                            vout: past_utxo.vout,
+                            removal_txid: cut_through_txid,
+                            removal_addy: tapscript.Address.fromScriptPubKey( cut_through_tx.vout[ 0 ].scriptPubKey, titanlib.network ),
+                        }
+                    } else {
+                        //the Server can revert the current Send transaction by "unsending" the money if it hasn't confirmed yet, so use the following process to prevent anything bad from happening:
+                        var watchingLoop = async () => {
+                            //stop watching if the cut_through_tx confirms
+                            var num_of_confs_for_cut_through_tx = await getNumOfConfs( cut_through_txid, titanlib.blockchain );
+                            if ( num_of_confs_for_cut_through_tx > 2 ) return;
+
+                            //use getAddressTxs() to get all txs that spend from the address created via multisig_scripts, and check if the cut_through_tx is among them;
+                            var multisig_scripts = [ [ alices_pub, "OP_CHECKSIGVERIFY", bobs_pub, "OP_CHECKSIG" ] ];
+                            var [ multisig_addy ] = titanlib.getAddressData( multisig_scripts, 0 );
+                            var txs_involving_multisig = await getAddressTxs( multisig_addy, titanlib.blockchain );
+                            var tx_i_seek_is_present = false;
+                            //TODO: fix this bug: the getAddressTxs function only returns the first 50 transactions involved in the swap address, so this technique will stop working once the user has sent money more than 50 times
+                            txs_involving_sweep_addy.every( tx => {
+                                if ( tx.txid !== cut_through_txid ) return true;
+                                tx_i_seek_is_present = true;
+                            });
+                            if ( !tx_i_seek_is_present ) {
+                                //if not, then recognize that the cut_through_tx got ejected from the mempool; also recognize that there are several possible reasons for that, and they fall into one of two categories: reasons that render the cut_through_tx still valid and reasons that render it invalid, of which, I think the only one worth considering is, one of its inputs belonging to the server got spent. Continue the process by checking whether the cut_through_tx is valid; do this by simply rebroadcasting it.
+                                var rebroadcast_txid = await titanlib.pushBTCpmt( cut_through_txhex, titanlib.blockchain );
+
+                                //If it goes through, well and good; update your state and run titanlib.unilaterallyExit().
+                                if ( typeof rebroadcast_txid === "string" && rebroadcast_txid.length === 64 ) {
+                                    state.past_utxos.push( past_utxo );
+                                    state.utxos.pop();
+
+                                    //save the info on your new utxo
+                                    state.utxos.push({
+                                        txid: cut_through_txid,
+                                        vout: 1,
+                                        addy: multisig_addy,
+                                        amount: Number( cut_through_tx.vout[ 1 ].value ),
+                                        bobs_sig_on_new_exit_tx,
+                                        pmthash: "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e",
+                                        preimage: "a".repeat( 64 ),
+                                        alices_utxo,
+                                        txfee,
+                                        txfee_rate,
+                                    });
+
+                                    var old_balance = alices_utxo.amount + 330;
+                                    var new_balance = cut_through_tx.vout[ 1 ].value + 330;
+                                    var preimage = preimage_provided;
+                                    var fees_paid = old_balance - amount - new_balance;
+                                    var txid = tapscript.Tx.util.getTxid( cut_through_tx );
+
+                                    titanlib.exitUnilaterally( state_id );
+                                    watchingLoop();
+                                    return;
+                                }
+
+                                //Otherwise, there must be an error message saying that one of its inputs is missing or spent; in that case, recognize that although the transaction is invalid, it is not safe to assume it is *forever* invalid, as whatever transaction spent one of its inputs might not be confirmed yet, and might never confirm. Continue the process by saving the cut_through_tx *and* the new utxo produced by it and *also* save this past utxo.
+                                //TODO: do not just save this data in a variable, save it in localstorage, and write a function that recovers it next time you open your wallet, checks if it needs to do anything, does anything necessary, and deletes the data otherwise
+                                var new_utxo = {
+                                    txid: cut_through_txid,
+                                    vout: 1,
+                                    addy: multisig_addy,
+                                    amount: Number( cut_through_tx.vout[ 1 ].value ),
+                                    bobs_sig_on_new_exit_tx,
+                                    pmthash: "e0e77a507412b120f6ede61f62295b1a7b2ff19d3dcc8f7253e51663470c888e",
+                                    preimage: "a".repeat( 64 ),
+                                    alices_utxo,
+                                    txfee,
+                                    txfee_rate,
+                                };
+                                var data_to_save = [
+                                    cut_through_txhex,
+                                    past_utxo,
+                                    new_utxo,
+                                ];
+
+                                //Then begin the unilateral exit process on the basis of the old state. When the 2026 blocks are up, continue the unilateral exit process by broadcasting the old state's exit tx, and simultaneously broadcast the cut_through_tx. One of two them should go through. If the unilateral exit tx goes through, well and good, the user safely exited. If the cut_through_tx goes through, update the user's state to recognize the new utxo, and then finish unilaterally exiting.
+
+                                //restore old state
+                                state.utxos.pop();
+                                state.utxos.push( past_utxo );
+
+                                //unilaterally exit
+                                titanlib.exitUnilaterally( state_id, false, cut_through_txhex, new_utxo );
+                            }
+
+                            await titanlib.waitSomeTime( 30_000 );
+                            watchingLoop();
+                        }
+                        watchingLoop();
+                    }
                     state.past_utxos.push( past_utxo );
                     state.utxos.pop();
                 }
 
                 //save the info on your new utxo
                 state.utxos.push({
-                    txid: tapscript.Tx.util.getTxid( cut_through_tx ),
+                    txid: cut_through_txid,
                     vout: 1,
                     addy: multisig_addy,
                     amount: Number( cut_through_tx.vout[ 1 ].value ),
@@ -486,9 +594,21 @@
                     showModal( `aborting because something went wrong; the server tried to use a feerate of ${txfee_rate} sats per byte when the real feerate is ${actual_txfee_rate} sats per byte` );
                     return alert( `aborting because something went wrong; the server tried to use a feerate of ${txfee_rate} sats per byte when the real feerate is ${actual_txfee_rate} sats per byte` );
                 }
-                var txfee = 1000;
+                var txfee_rate = balance.feerates[ 1 ];
+                var txfee = 1000 * txfee_rate;
 
-                //TODO: validate the utxos
+                //validate the utxos
+                var utxos_are_valid = true;
+                var i; for ( i=0; i<utxos.length; i++ ) {
+                    var utxo = utxos[ i ];
+                    var utxo_exists = await titanlib.utxoExists( utxo.txid, utxo.vout, utxo.addy, titanlib.blockchain );
+                    if ( utxo_exists ) continue;
+                    utxos_are_valid = false;
+                }
+                if ( !utxos_are_valid ) {
+                    showModal( `aborting because something went wrong; the server tried to create the transaction with utxos that do not exist` );
+                    return alert( `aborting because something went wrong; the server tried to create the transaction with utxos that do not exist` );
+                }
 
                 //prepare the amount
                 var sum = 0;
@@ -505,11 +625,15 @@
                 state.utxos.forEach( utxo => sum_of_users_existing_utxos = sum_of_users_existing_utxos + utxo.amount );
                 var amnt_for_swap_addy = amount + sum_of_users_existing_utxos;
                 amnt_for_swap_addy = amnt_for_swap_addy - txfee;
+                console.log( 88.5, amnt_for_swap_addy );
                 if ( make_connector ) amnt_for_swap_addy = amnt_for_swap_addy - 330;
 
                 //get the transactions that need to be signed
+                console.log( 89, amnt_for_swap_addy );
                 var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos, make_connector, txfee, txfee_rate );
                 var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock, new_txfee } = txs;
+                console.log( 90, JSON.stringify( tx3 ) );
+                console.log( 91, JSON.stringify( tx4 ) );
                 if ( make_connector ) {
                     var tx0_txid = tapscript.Tx.util.getTxid( tx0 );
                     var connector_tx = tapscript.Tx.create({
@@ -608,14 +732,28 @@
                     what_to_do: "exit_unilaterally",
                     when_to_stop_watchtower: 6,
                     removal_txid: tx0_txid,
+                    removal_addy: tapscript.Address.fromScriptPubKey( tx0.vout[ 0 ].scriptPubKey, titanlib.network ),
                 }
 
                 //move your old utxo data to past utxos, if necessary
                 if ( state.utxos.length ) {
                     var past_utxo = JSON.parse( JSON.stringify( state.utxos[ 0 ] ) );
-                    //TODO: write a function that removes old utxo data 10 blocks after the confirmation of whatever txid is given in remove_when_this_tx_has_ten_confs
-                    past_utxo = { ...past_utxo, remove_when_this_tx_has_ten_confs: tx0_txid };
-                    //TODO: watch out! The server might broadcast an old tx1 now that you've converted this utxo into an old utxo; if that happens, you must be prepared to restore this utxo and unilaterally exit. Note that one might think the server can theoretically do a similar thing with a funding_tx or a cut_through_tx if the user's last tx was a send tx, but there's a caveat: if the user's last send tx confirmed, broadcasting it now won't change anything, as the current transaction is a child of those anyway; and even if they did not yet confirm, broadcasting it now still won't change anything, as that will just rebroadcast the parent of this tx; so the server can only really broadcast anything unreasonable if an unconfirmed tx signed by the user spends the same utxo as a tx1 held by the server
+                    //remove old utxo data 10 blocks after the confirmation of tx0
+                    state.watchtower[ tx0_txid ] = {
+                        what_to_do: "remove_utxo_after_ten_confs",
+                        txid: past_utxo.txid,
+                        vout: past_utxo.vout,
+                    }
+                    //watch out! The server might broadcast an old tx1 now that you've converted this utxo into an old utxo; if that happens, and the tx1 confirms, I restore this utxo and unilaterally exit. Note that one might think the server can theoretically do a similar thing with a funding_tx or a cut_through_tx if the user's last tx was a send tx, but there's a caveat: if the user's last send tx confirmed, broadcasting it now won't change anything, as the current transaction is a child of those anyway; and even if they did not yet confirm, broadcasting it now still won't change anything, as that will just rebroadcast the parent of this tx; so the server can only really broadcast anything unreasonable if an unconfirmed tx signed by the user spends the same utxo as a tx1 held by the server, which is the very thing I am now saying to watch out for
+                    if ( past_utxo.tx1_txid ) {
+                        state.watchtower[ past_utxo.tx1_txid ] = {
+                            what_to_do: "after_five_confs_restore_old_state_and_exit",
+                            txid: past_utxo.txid,
+                            vout: past_utxo.vout,
+                            removal_txid: tx0_txid,
+                            removal_addy: tapscript.Address.fromScriptPubKey( tx0.vout[ 0 ].scriptPubKey, titanlib.network ),
+                        }
+                    }
                     state.past_utxos.push( past_utxo );
                     state.utxos.pop();
                 }
@@ -634,13 +772,14 @@
                     utxos,
                     txfee,
                     txfee_rate,
+                    tx1_txid,
                 });
 
                 brick_wallet.processInvoice( invoice, txid, txfee * 1000 );
 
                 return true;
             },
-            exitUnilaterally: async ( state_id, tx1_was_broadcasted ) => {
+            exitUnilaterally: async ( state_id, tx1_was_broadcasted, cut_through_txhex, new_utxo, skip_getting_funds ) => {
                 //prepare requisite variables
                 var state = titanlib.state[ state_id ];
                 var alices_priv = state.alices_priv;
@@ -708,12 +847,14 @@
                     alices_new_exit_tx.vin.pop();
 
                     //get enough sats to pay for the unilateral exit txs
-                    console.log( `now we will do a unilateral withdrawal. For that, we need to deposit enough coins to pay for two v3 transactions, so we need ${new_txfee_1 + new_txfee_2 + new_txfee_3} sats. Deposit that here:` );
-                    console.log( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3} or more sats to this address:` );
-                    console.log( addy );
-                    var txid = prompt( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3} or more sats to the address in your console and enter the txid` );
-                    var vout = Number( prompt( `and the vout` ) );
-                    var amnt = Number( prompt( `and the amnt` ) );
+                    if ( !skip_getting_funds ) {
+                        console.log( `now we will do a unilateral withdrawal. For that, we need to deposit enough coins to pay for two v3 transactions, so we need ${new_txfee_1 + new_txfee_2 + new_txfee_3} sats. Deposit that here:` );
+                        console.log( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3} or more sats to this address:` );
+                        console.log( addy );
+                        var txid = prompt( `send ${new_txfee_1 + new_txfee_2 + new_txfee_3} or more sats to the address in your console and enter the txid` );
+                        var vout = Number( prompt( `and the vout` ) );
+                        var amnt = Number( prompt( `and the amnt` ) );
+                    }
 
                     //modify the exit txs to add your fee-paying utxos
                     exit_tx_2.vin[ 0 ].txid = txid;
@@ -737,14 +878,44 @@
                     alices_new_exit_tx.vin[ 2 ].witness = [ alices_third_sig_on_new_exit_tx ];
 
                     //broadcast the txs
-                    console.log( 'broadcast exit_tx_1:' );
-                    console.log( tapscript.Tx.encode( exit_tx_1 ).hex );
-                    console.log( 'broadcast exit_tx_2:' );
-                    console.log( tapscript.Tx.encode( exit_tx_2 ).hex );
-                    console.log( 'wait 2026 blocks (but for testing purposes it is only 7)' );
+                    if ( !skip_getting_funds ) {
+                        //TODO: broadcast these transactions as a package
+                        titanlib.pushBTCpmt( tapscript.Tx.encode( exit_tx_1 ).hex, titanlib.blockchain );
+                        console.log( 'broadcast exit_tx_1:' );
+                        console.log( tapscript.Tx.encode( exit_tx_1 ).hex );
+                        titanlib.pushBTCpmt( tapscript.Tx.encode( exit_tx_2 ).hex, titanlib.blockchain );
+                        console.log( 'broadcast exit_tx_2:' );
+                        console.log( tapscript.Tx.encode( exit_tx_2 ).hex );
+                        console.log( 'wait 2026 blocks (but for testing purposes it is only 7)' );
+                    }
+                    //TODO: actually wait the appropriate number of blocks before continuing, and tell the user what is going on, and handle it if they close the wallet while they are waiting
+                    var alices_new_exit_tx_worked = await titanlib.pushBTCpmt( tapscript.Tx.encode( alices_new_exit_tx ).hex, titanlib.blockchain );
                     console.log( 'broadcast alices_new_exit_tx:' );
                     console.log( tapscript.Tx.encode( alices_new_exit_tx ).hex );
-                    alert( 'broadcast the transactions in your console, in this order: exit_tx_1 and exit_tx_2 as a package; then wait 2026 blocks (but for testing purposes it is only 7); then alices_new_exit_tx' );
+
+                    if ( cut_through_txhex ) {
+                        //If the unilateral exit tx goes through, well and good, the user safely exited.
+                        if ( typeof alices_new_exit_tx_worked === "string" && alices_new_exit_tx_worked.length === 64 ) {
+                            showModal( `<p>the server tried to cheat you, so you exited unilaterally.</p><p>You can use faucet_generator to manage your funds:</p><p>https://supertestnet.github.io/faucet_generator/#network=${titanlib.blockchain.substring( 0, titanlib.blockchain.length - 1 )}#privkey=${state.alices_priv}</p>` );
+                            return;
+                        }
+                        //If the cut_through_tx goes through, update the user's state to recognize the new utxo, and then finish unilaterally exiting.
+                        var rebroadcast_txid = await titanlib.pushBTCpmt( cut_through_txhex, titanlib.blockchain );
+                        await titanlib.waitSomeTime( 2_000 );
+                        console.log( 'also broadcast this cut_through_tx:' );
+                        console.log( cut_through_txhex );
+
+                        //restore old state
+                        state.utxos.pop();
+                        state.utxos.push( new_utxo );
+
+                        //unilaterally exit
+                        var skip_getting_funds = true;
+                        titanlib.exitUnilaterally( state_id, false, null, null, skip_getting_funds );
+                    }
+
+                    alert( 'broadcast the transactions in your console, in this order: exit_tx_1 and exit_tx_2 as a package (if present; they may not be); then wait 2026 blocks (but for testing purposes it is only 8 -- also, if exit_tx_1 and exit_tx_2 are not present, you do not need to wait 2026 blocks); finally, broadcast alices_new_exit_tx' );
+
                     return;
                 } else {
                     //get the txs you need to exit
@@ -976,7 +1147,7 @@
                     "ab".repeat( 68 ),
                     //and a 33 byte cblock if Alice sent last, otherwise add a 65 byte cblock
                     alices_utxo.hasOwnProperty( "alices_utxo" ) ? "ab".repeat( 33 ) : "ab".repeat( 65 ),
-                ]
+                ];
                 var vsize = tapscript.Tx.util.getTxSize( cut_through_tx ).vsize;
                 var new_txfee = vsize * txfee_rate;
                 cut_through_tx.vout[ 1 ].value = alices_utxo.amount - amount - new_txfee;
@@ -1117,7 +1288,7 @@
                     version: 3,
                     vin: [
                         //change the 2026 to 8 for testing purposes
-                        titanlib.getVin( connector_txid, 0, 330, alices_address, 8 ),
+                        titanlib.getVin( connector_txid, 0, 330, alices_address, 2026 ),
                         titanlib.getVin( tx0_txid, 0, amount, swap_addy ),
                     ],
                     vout: [
@@ -1161,6 +1332,7 @@
                         titanlib.state[ state_id ][ "connector_prev" ] = null;
                         titanlib.state[ state_id ][ "blocked_from_receiving" ] = false;
                         titanlib.state[ state_id ][ "blocked_from_sending" ] = false;
+                        titanlib.state[ state_id ][ "watchtower" ] = {}
 
                         var message = JSON.stringify({
                             msg_type: "init_reply",
@@ -1212,11 +1384,13 @@
                         //assume, for now, that the size of tx0 will be 1000 bytes
                         var txfee_rate = balance.feerates[ 1 ];
                         var txfee = 1000 * txfee_rate;
+                        console.log( 84, txfee );
                         amount_to_find_utxos_for = amount_to_find_utxos_for + txfee;
                         var sum_of_users_existing_utxos = 0;
                         state.utxos.forEach( utxo => sum_of_users_existing_utxos = sum_of_users_existing_utxos + utxo.amount );
                         var amnt_for_swap_addy = amount + sum_of_users_existing_utxos;
                         amnt_for_swap_addy = amnt_for_swap_addy - txfee;
+                        console.log( 85, amnt_for_swap_addy );
                         if ( make_connector ) amnt_for_swap_addy = amnt_for_swap_addy - 330;
 
                         //find utxos to send to user
@@ -1317,6 +1491,7 @@
                         var pmthash = brick_wallet.getInvoicePmthash( invoice );
 
                         //get the transactions that need to be signed
+                        console.log( 86, amnt_for_swap_addy );
                         var txs = titanlib.getReceiveTxData( state_id, amnt_for_swap_addy, pmthash, utxos_to_use, make_connector, txfee, txfee_rate );
                         var { tx0, tx1, tx2, tx3, tx4, swap_scripts, swap_addy, swap_tree, swap_cblock, new_txfee } = txs;
 
@@ -1339,6 +1514,8 @@
                         }
 
                         //sign tx3 and tx4
+                        console.log( 87, JSON.stringify( tx3 ) );
+                        console.log( 88, JSON.stringify( tx4 ) );
                         var bobs_sig_on_tx3 = tapscript.Signer.taproot.sign( bobs_priv, tx3, 1, {extension: swap_tree[ 1 ], sigflag: 0x02 }).hex;
                         var bobs_sig_on_tx4 = tapscript.Signer.taproot.sign( bobs_priv, tx4, 0, {extension: swap_tree[ 1 ], sigflag: 0x82 }).hex;
 
@@ -1406,8 +1583,12 @@
                         //move the user's old utxo data to past utxos, if necessary
                         if ( state.utxos.length ) {
                             var past_utxo = JSON.parse( JSON.stringify( state.utxos[ 0 ] ) );
-                            //TODO: write a function that removes old utxo data 10 blocks after the confirmation of whatever txid is given in remove_when_this_tx_has_ten_confs
-                            past_utxo = { ...past_utxo, remove_when_this_tx_has_ten_confs: tapscript.Tx.util.getTxid( tx0 ) };
+                            //remove old utxo data 10 blocks after the confirmation of tx0
+                            state.watchtower[ tapscript.Tx.util.getTxid( tx0 ) ] = {
+                                what_to_do: "remove_utxo_after_ten_confs",
+                                txid: past_utxo.txid,
+                                vout: past_utxo.vout,
+                            }
                             state.past_utxos.push( past_utxo );
                             state.utxos.pop();
                         }
@@ -1436,9 +1617,16 @@
                         utxos_to_remove.forEach( item => delete titanlib.server_info.utxos[ item ] );
                         var vout_for_display = make_connector ? 2 : 1;
                         var utxo_id = "s_" + tapscript.Tx.util.getTxid( tx0 ) + "_" + String( vout_for_display );
-                        //TODO: ensure the utxo remains unspent til a few blocks after tx0 confirms
+                        //ensure the utxo remains unspent til a few blocks after tx0 confirms, in other words, watch tx0 til it has 2 confs and then change the status of this utxo to spendable
+                        state.watchtower[ tapscript.Tx.util.getTxid( tx0 ) ] = {
+                            what_to_do: "mark_utxo_as_spendable_after_two_confs",
+                            utxo_id,
+                            removal_txid: tapscript.Tx.util.getTxid( tx0 ),
+                            removal_addy: tapscript.Address.fromScriptPubKey( tx0.vout[ 0 ].scriptPubKey, titanlib.network ),
+                        }
+                        if ( !titanlib.watchtower_is_running ) titanlib.watchtower( state_id );
                         if ( i_have_change ) {
-                            titanlib.server_info.utxos[ utxo_id ] = {txid: tapscript.Tx.util.getTxid( tx0 ), vout: make_connector ? 2 : 1, amnt: i_have_change, addy: bobs_address, priv: bobs_priv, utxo_id, unspendable_til: 5}
+                            titanlib.server_info.utxos[ utxo_id ] = {txid: tapscript.Tx.util.getTxid( tx0 ), vout: make_connector ? 2 : 1, amnt: i_have_change, addy: bobs_address, priv: bobs_priv, utxo_id, unspendable: true,}
                         }
 
                         //check if invoice is paid; if not paid in 5 minutes,
@@ -1683,8 +1871,12 @@
                                 //move the user's old utxo data to past utxos, if necessary
                                 if ( state.utxos.length ) {
                                     var past_utxo = JSON.parse( JSON.stringify( state.utxos[ 0 ] ) );
-                                    //TODO: write a function that removes old utxo data 10 blocks after the confirmation of whatever txid is given in remove_when_this_tx_has_ten_confs
-                                    past_utxo = { ...past_utxo, remove_when_this_tx_has_ten_confs: tapscript.Tx.util.getTxid( cut_through_tx ) };
+                                    //remove old utxo data 10 blocks after the confirmation of tx0
+                                    state.watchtower[ tapscript.Tx.util.getTxid( cut_through_tx ) ] = {
+                                        what_to_do: "remove_utxo_after_ten_confs",
+                                        txid: past_utxo.txid,
+                                        vout: past_utxo.vout,
+                                    }
                                     state.past_utxos.push( past_utxo );
                                     state.utxos.pop();
                                 }
@@ -1844,8 +2036,11 @@
                 var url_half = `https://${titanlib.explorer}/${network}`;
                 if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
                 var response = await fetch( url_half + "api/tx", {method: "POST", body: rawtx});
-                var txid = await response.text();
-                return txid;
+                try {
+                    var txid = await response.text();
+                    return txid;
+                } catch ( e ) {}
+                return "error";
             },
             watchForTxid: async ( txid, network, started_watching ) => {
                 var now = Math.floor( Date.now() / 1000 );
@@ -1858,21 +2053,171 @@
                 if ( !response.ok ) return titanlib.watchForTxid( txid, network, started_watching );
             },
             watchtower: async state_id => {
+                titanlib.watchtower_is_running = true;
                 var state = titanlib.state[ state_id ];
                 Object.keys( state.watchtower ).forEach( async txid => {
-                    var tx_was_broadcast = await titanlib.watchForTxid( txid, titanlib.blockchain );
-                    if ( tx_was_broadcast === "not yet" ) {
-                        //TODO: check to see if this txid should be removed from the watchtower; if so, remove it and then return, otherwise just return; note that I can check to see if this txid should be removed from the watchtower by verifying whether output 0 of its removal_txid got spent; 6 blocks later, I can stop watching for this txid. Also note that I can check if a particular output got spent by doing this two-step process: first, query for the removal_txid; if you get a 404 error, the output is unspent, and you do not need to do the second step. Second, query for all utxos locked to vout 0's address, and check if any of them have a txid that matches the removal txid, and a vout of 0; if so, the output is unspent. Otherwise, it is spent.
+                    var item = state.watchtower[ txid ];
+                    var num_of_confs = await getNumOfConfs( txid, titanlib.blockchain );
+                    if ( !num_of_confs && item.removal_txid ) {
+                        //check to see if this txid should be removed from the watchtower; if so, remove it and then return, otherwise just return; here is a more detailed process: first, query for how many confs the removal_txid has; if it is less than 5, consider the output unspent, and return -- you don't need to do the second step in this case. Second, query for all utxos locked to vout 0's address, and check if any of them have a txid that matches the removal txid, and a vout of 0; if so, the output is unspent, so return -- you do not need to do anything further. Lastly, if you make it this far, the utxo is spent, so remove this txid from the watchtower.
+
+                        //query for how many confs the removal_txid has
+                        var num_of_confs_for_removal_txid = await getNumOfConfs( item.removal_txid, titanlib.blockchain );
+
+                        //if it is less than 5, consider the output unspent, and return
+                        if ( num_of_confs_for_removal_txid < 5 ) return;
+
+                        //query for all utxos locked to vout 0's address, and check if any of them have a txid that matches the removal txid, and a vout of 0; if so, the output is unspent, so return
+                        var utxo_exists = await titanlib.utxoExists( item.removal_txid, 0, item.removal_addy, network );
+                        if ( utxo_exists ) return;
+
+                        //if you make it this far, the utxo is spent, so remove this txid from the watchtower
+                        delete state.watchtower[ txid ];
                         return;
                     }
-                    var what_to_do = state.watchtower[ txid ][ "what_to_do" ];
+                    var what_to_do = item[ "what_to_do" ];
+                    if ( what_to_do === "remove_utxo_after_ten_confs" && num_of_confs >= 10 ) {
+                        var index_of_utxo = -1;
+                        state.past_utxos.every( ( utxo, index ) => {
+                            if ( utxo.txid !== item.txid || utxo.vout !== item.vout ) return true;
+                            index_of_utxo = index;
+                        });
+                        state.past_utxos.splice( index, 1 );
+                        delete state.watchtower[ txid ];
+                        return;
+                    }
+                    if ( what_to_do === "after_five_confs_restore_old_state_and_exit" ) {
+                        if ( num_of_confs < 5 ) return;
+
+                        //restore old state
+                        var index_of_utxo = -1;
+                        state.past_utxos.every( ( utxo, index ) => {
+                            if ( utxo.txid !== item.txid || utxo.vout !== item.vout ) return true;
+                            index_of_utxo = index;
+                        });
+                        var past_utxo = JSON.parse( JSON.stringify( state.past_utxos[ index_of_utxo ] ) );
+                        state.utxos.pop();
+                        state.utxos.push( past_utxo );
+
+                        //unilaterally exit
+                        delete state.watchtower[ txid ];
+                        titanlib.exitUnilaterally( state_id, true );
+                        return;
+                    }
+                    if ( what_to_do === "mark_utxo_as_spendable_after_two_confs" ) {
+                        if ( num_of_confs < 2 ) return;
+                        var utxo_id = item.utxo_id;
+                        if ( titanlib.server_info.utxos.hasOwnProperty( utxo_id ) ) titanlib.server_info.utxos[ utxo_id ].spendable = true;
+                        delete state.watchtower[ txid ];
+                        return;
+                    }
                     if ( what_to_do === "sweep_the_swap_output_or_grab_its_preimage" ) {
-                        //TODO: (1) watch for bob to broadcast a sweep tx; (2) if he does so before the swap addy's timelock expires, grab the preimage and treat it as a proof of payment; (3) create a tx using my_sweep_data to construct the input and alices_address as an output; (4) broadcast the resulting tx when the swap addy's timelock expires; (5) continue to watch for bob to broadcast a sweep tx til 10 blocks after your own sweep tx confirms; (6) if he does so, grab the preimage and treat it as a proof of payment
+                        //prepare requisite variables
+                        var alices_pub = state.alices_pub;
+                        var alices_address = tapscript.Address.fromScriptPubKey( [ 1, alices_pub ], titanlib.network );
+
+                        //(1) check if bob's sweep tx confirmed;
+                        var sweep_data = item.my_sweep_data;
+                        //TODO: fix this bug: the getAddressTxs function only returns the first 50 transactions involved in the swap address, so the Server can trick the code; simply create 50 transactions that all send coins to the swap address, then sweep them all; the code here will not find the spend transaction it expects among the first 50 transactions, so it will not get the preimage, and the user won't get their proof of payment, even though it is on the blockchain. This might not seem like that big of a deal, as the user will still end up in an exit state with all of the money that is rightfully theirs, but it is bad for the following reason: unless I change something, the user's wallet will never show them their privkey, so they probably won't know how to send their funds anywhere, and it will also never even show them that it's no longer working; it will just get stuck trying to sweep the funds from the swap address invalidly and waiting for that invalid tx to confirm
+                        var txs_involving_sweep_addy = await getAddressTxs( sweep_data.swap_addy, titanlib.blockchain );
+                        var index_of_tx_i_seek = -1;
+                        var index_of_vin = -1;
+                        var txid_i_seek = "";
+                        txs_involving_sweep_addy.every( ( tx, index ) => {
+                            var time_to_stop = false;
+                            tx.vin.forEach( ( input, idx ) => {
+                                if ( input.txid === sweep_data.txid && input.vout === sweep_data.vout ) {
+                                    time_to_stop = true;
+                                    index_of_vin = idx;
+                                }
+                            });
+                            if ( !time_to_stop ) return true;
+                            index_of_tx_i_seek = index;
+                            txid_i_seek = tx.txid;
+                        });
+
+                        var num_of_confs_for_bob = 0;
+                        if ( txid_i_seek ) num_of_confs_for_bob = await getNumOfConfs( txid_i_seek, titanlib.blockchain );
+                        //(2) if so, grab its preimage, treat it as a proof of payment, alert the user of their successful exit, and delete this item from the watchtower, you do not need to do the other steps;
+                        var preimage = await getPreimageFromTransactionThatSpendsAnHTLC( txid_i_seek, pmthash, network );
+                        if ( num_of_confs_for_bob && preimage ) {
+                            console.log( 'here is your proof of payment:' );
+                            console.log( preimage );
+                            showModal( `<p>the server kicked you out. Your proof of payment for your latest payment is in your console, and your money is on the following blockchain: ${titanlib.blockchain.substring( 0, titanlib.blockchain.length - 1 )} in an address with this private key:</p><p>${state.alices_priv}</p><p>You can use faucet_generator to manage your funds:</p><p>https://supertestnet.github.io/faucet_generator/#network=${titanlib.blockchain.substring( 0, titanlib.blockchain.length - 1 )}#privkey=${state.alices_priv}</p>` );
+                            delete state.watchtower[ txid ];
+                            return;
+                        }
+
+                        //(3) otherwise, check if the swap addy's timelock expired, and return if not;
+                        var num_of_confs_since_swap_addy_got_funded = await getNumOfConfs( sweep_data.txid, titanlib.blockchain );
+                        if ( num_of_confs_since_swap_addy_got_funded <= sweep_data.blocks_to_wait ) return;
+
+                        //(4) otherwise, get the txid of the sweep_tx useful to Alice as described in the next step, and check if that confirmed;
+                        var fake_txfee = 500;
+                        var my_sweep_tx = tapscript.Tx.create({
+                            vin: [{
+                                txid: sweep_data.txid,
+                                vout: sweep_data.vout,
+                                prevout: {
+                                    value: sweep_data.prevout.value,
+                                    scriptPubKey: tapscript.Address.toScriptPubKey( sweep_data.prevout.addy ),
+                                },
+                                sequence: sweep_data.blocks_to_wait,
+                            }],
+                            vout: [{
+                                value: sweep_data.prevout.value - fake_txfee,
+                                scriptPubKey: tapscript.Address.toScriptPubKey( alices_address ),
+                            }]
+                        });
+
+                        //calculate better fee estimates
+                        if ( sweep_data.feerate_i_ended_up_with ) {
+                            var txfee_rate = sweep_data.feerate_i_ended_up_with;
+                        } else {
+                            var txfee_rate = balance.feerates[ 1 ];
+                            sweep_data.feerate_i_ended_up_with = txfee_rate;
+                        }
+                        my_sweep_tx.vin[ 0 ].witness = [ "ab".repeat( 64 ) ];
+                        var vsize = tapscript.Tx.util.getTxSize( my_sweep_tx ).vsize;
+                        var new_txfee = vsize * txfee_rate;
+                        my_sweep_tx.vin[ 0 ].witness = [];
+
+                        //modify the sweep tx's output per the better fee estimate
+                        my_sweep_tx.vout[ 0 ].value = sweep_data.prevout.value - new_txfee;
+                        var sweep_txid = tapscript.Tx.util.getTxid( sweep_tx );
+                        var num_of_confs_for_alice = await getNumOfConfs( sweep_txid, titanlib.blockchain );
+
+                        //(5) if not, create the sweep_tx useful to Alice by using my_sweep_data to construct the input and alices_address as an output, broadcast the resulting tx, and return;
+                        if ( !num_of_confs_for_alice ) {
+                            var sig = tapscript.Signer.taproot.sign( state.alices_priv, my_sweep_tx, 0, {} );
+                            my_sweep_tx.vin[ 0 ].witness = [ sig ];
+                            var txhex = tapscript.Tx.encode( my_sweep_tx ).hex;
+                            console.log( 'broadcast this sweep_tx:' );
+                            console.log( txhex );
+                            titanlib.pushBTCpmt( txhex, titanlib.blockchain );
+                            await titanlib.waitSomeTime( 2_000 );
+                            return;
+                        }
+
+                        //(6) otherwise, alert the user of his or her successful exit, and delete this item from the watchtower
+                        showModal( `<p>the server kicked you out. Your money is on the following blockchain: ${titanlib.blockchain.substring( 0, titanlib.blockchain.length - 1 )} in an address with this private key:</p><p>${state.alices_priv}</p><p>You can use faucet_generator to manage your funds:</p><p>https://supertestnet.github.io/faucet_generator/#network=${titanlib.blockchain.substring( 0, titanlib.blockchain.length - 1 )}#privkey=${state.alices_priv}</p>` );
+                        delete state.watchtower[ txid ];
+                        return;
                     }
                     if ( what_to_do === "exit_unilaterally" ) titanlib.exitUnilaterally( state_id, true );
                 });
                 await titanlib.waitSomeTime( 30_000 );
                 titanlib.watchtower( state_id );
+            },
+            utxoExists: async ( txid, vout, addy, network ) => {
+                var url_half = `https://mempool.space/${network}`;
+                if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
+                var response = await fetch( `${url_half}/api/address/${addy}/utxo` );
+                if ( !response.ok ) return;
+                var json = await response.json();
+                var i; for ( i=0; i<json.length; i++ ) {
+                    if ( json[ i ].txid === txid && json[ i ].vout === vout ) return true;
+                }
             },
             // runTests: async () => {
             //     var nprofile = await titanlib.runServer();
@@ -2080,16 +2425,16 @@
         }
 
         var getBlockheight = async network => {
-            var url_half = `https://${titanlib.explorer}/`;
+            var url_half = `https://${titanlib.explorer}/${network}`;
             if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
-            var data = await getData( `${url_half}/${network}api/blocks/tip/height` );
+            var data = await getData( `${url_half}/api/blocks/tip/height` );
             return Number( data );
         }
 
         var getThreeFeeRates = async network => {
-            var url_half = `https://${titanlib.explorer}/`;
+            var url_half = `https://${titanlib.explorer}/${network}`;
             if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
-            var fees = await getData( `${url_half}/${network}api/v1/fees/recommended` );
+            var fees = await getData( `${url_half}/api/v1/fees/recommended` );
             fees = JSON.parse( fees );
             var array = [ fees[ "minimumFee" ], fees[ "hourFee" ], fees[ "fastestFee" ] ];
             return array;
@@ -2139,6 +2484,30 @@
             var json = await response.json();
             if ( json.status.hasOwnProperty( "block_height" ) && json.status[ "block_height" ] > 0 ) return Math.abs( balance.blockheight - json.status[ "block_height" ] );
             return 0;
+        }
+
+        var getAddressTxs = async ( addy, network ) => {
+            var url_half = `https://${titanlib.explorer}/${network}`;
+            if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
+            try {
+                var response = await fetch( `${url_half}api/address/${addy}/txs` );
+                var json = await response.json();
+                return json;
+            } catch( e ) {}
+            return [];
+        }
+
+        async function getPreimageFromTransactionThatSpendsAnHTLC( txid, pmthash, network ) {
+            var url_half = `https://${titanlib.explorer}/${network}`;
+            if ( network === "mutinynet/" ) url_half = `https://mutinynet.com/`;
+            var json = await getData( `${url_half}api/tx/${txid}` );
+            var i; for ( i=0; i<json[ "vin" ].length; i++ ) {
+                var j; for ( j=0; j<json[ "vin" ][ i ][ "witness" ].length; j++ ) {
+                    var element = json[ "vin" ][ i ][ "witness" ][ j ];
+                    var hash_of_element = await titanlib.sha256( titanlib.hexToBytes( element ) );
+                    if ( hash_of_element === pmthash ) return element;
+                }
+            }
         }
     </script>
     <style>
@@ -3065,7 +3434,7 @@
                 "ab".repeat( 68 ),
                 //and a 33 byte cblock if Alice sent last, otherwise add a 65 byte cblock
                 alices_utxo.hasOwnProperty( "alices_utxo" ) ? "ab".repeat( 33 ) : "ab".repeat( 65 ),
-            ]
+            ];
             //add a 64 byte sig to the second input
             exit_tx.vin[ 1 ].witness = [ "ab".repeat( 64 ) ];
             var vsize = tapscript.Tx.util.getTxSize( exit_tx ).vsize;
@@ -3360,7 +3729,7 @@
             walletSaver();
 
             if ( !titanlib.server_info.nwc_string ) {
-                $( 'body' ).innerHTML = `enter an nwc string for testnet4.`;
+                $( 'body' ).innerHTML = `enter an nwc string for testnet4`;
                 setTimeout( async () => {
                     var nwc_string = null;
                     if ( params.hasOwnProperty( "nwc_string" ) ) nwc_string = titanlib.hexToText( params.nwc_string );
