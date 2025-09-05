@@ -251,7 +251,8 @@
             },
             sendLN: async ( state_id, amount, invoice ) => {
                 if ( amount < 1_500 ) return alert( 'that is too little -- send at least 1500 sats' );
-                if ( amount > 10_000 ) return alert( 'that is too much -- send at most 10,000 sats' );
+                if ( amount > 30_000 ) return alert( 'that is too much -- send at most 10,000 sats' );
+                if ( titanlib.getBalance( state_id ) - amount < 1_830 ) return alert( 'error, sending that amount would put your balance below 1830 sats, which is not allowed' );
 
                 //prepare requisite variables
                 var state = titanlib.state[ state_id ];
@@ -1778,7 +1779,9 @@
                         var pmthash = message.msg_value.pmthash;
                         var invoice = message.msg_value.invoice;
                         if ( amount < 1_500 ) return console.log( 'aborting: sender tried to send too little' );
-                        if ( amount > 10_000 ) return console.log( 'aborting: sender tried to send too much' );
+                        if ( amount > 30_000 ) return console.log( 'aborting: sender tried to send too much' );
+                        if ( titanlib.getBalance( state_id ) - amount < 1_830 ) return console.log( 'aborting: sender tried to send an amount that would put their balance below 1830 sats' );
+                        if ( titanlib.getBalance( state_id ) )
                         var alices_utxo = state.utxos[ 0 ];
                         var txfee = message.msg_value.txfee;
                         //use the mempool to ensure the txfee_rate is reasonable
