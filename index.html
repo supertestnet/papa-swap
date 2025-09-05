@@ -3363,7 +3363,7 @@
                 $( 'body' ).innerHTML = `enter an nwc string for testnet4.`;
                 setTimeout( async () => {
                     var nwc_string = null;
-                    if ( params.hasOwnProperty( "nwc_string" ) ) nwc_string = params.nwc_string;
+                    if ( params.hasOwnProperty( "nwc_string" ) ) nwc_string = titanlib.hexToText( params.nwc_string );
                     if ( !nwc_string ) nwc_string = prompt( `enter an nwc string for testnet4` );
                     if ( !nwc_string || !nwc_string.startsWith( "nostr+walletconnect://" ) ) {
                         $( 'body' ).innerHTML = `That nwc string was invalid. Refresh the page and try again.`;
@@ -3473,7 +3473,9 @@
                     return;
                 }
                 var url = window.location.protocol + "//" + window.location.hostname + window.location.pathname + "?server=true";
-                var server_nprofile = prompt( `enter the server's nprofile. note that you can *run* a server by visiting this url: ${url}` );
+                var server_nprofile = null;
+                if ( params.hasOwnProperty( "server_nprofile" ) ) server_nprofile = params.server_nprofile;
+                if ( !server_nprofile ) server_nprofile = prompt( `enter the server's nprofile. note that you can *run* a server by visiting this url: ${url}` );
                 if ( server_nprofile && server_nprofile.startsWith( "nprofile1" ) ) {
                     var make_new_state = true;
                     titanlib.init( server_nprofile, make_new_state );
