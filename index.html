@@ -1781,7 +1781,6 @@
                         if ( amount < 1_500 ) return console.log( 'aborting: sender tried to send too little' );
                         if ( amount > 30_000 ) return console.log( 'aborting: sender tried to send too much' );
                         if ( titanlib.getBalance( state_id ) - amount < 1_830 ) return console.log( 'aborting: sender tried to send an amount that would put their balance below 1830 sats' );
-                        if ( titanlib.getBalance( state_id ) )
                         var alices_utxo = state.utxos[ 0 ];
                         var txfee = message.msg_value.txfee;
                         //use the mempool to ensure the txfee_rate is reasonable
