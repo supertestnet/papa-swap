@@ -10,6 +10,10 @@ Papa Swaps are an "upgrade" over regular submarine swaps with the following bene
 (3) Papa swaps slash the cost of submarine swaps in half due to needing half the number of transactions  
 (4) Papa swaps slash the cost even further by using taproot, where scripts of this kind are more efficient than they are in segwit v0
 
+# How to try it
+
+Click here and follow the instructions: https://supertestnet.github.io/papa-swap/
+
 # How it works
 
 A papa swap server does the following things: it (1) sets a swap fee (2) funds a wallet with base layer sats (3) uses an NWC string as a funding source. (I suppose it could use *any* backend that is capable of receiving lightning payments, but I want to use NWC in my implementation because NWC is cool.) It also listens for swap requests over nostr. When a swap request comes in, it checks that the user wants money equal to or less than the amount in #2. If so, it assesses the fee from #1 and generates a lightning invoice for that amount, which it presents to the user.
