@@ -3353,9 +3353,9 @@
             walletSaver();
 
             if ( !titanlib.server_info.nwc_string ) {
-                $( 'body' ).innerHTML = `enter an nwc string.`;
+                $( 'body' ).innerHTML = `enter an nwc string for testnet4.`;
                 setTimeout( async () => {
-                    var nwc_string = prompt( `enter an nwc string` );
+                    var nwc_string = prompt( `enter an nwc string for testnet4` );
                     if ( !nwc_string || !nwc_string.startsWith( "nostr+walletconnect://" ) ) {
                         $( 'body' ).innerHTML = `That nwc string was invalid. Refresh the page and try again.`;
                         return;
