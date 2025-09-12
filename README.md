@@ -12,7 +12,7 @@ Papa Swaps are an "upgrade" over regular submarine swaps with the following bene
 
 # How to try it
 
-Click here and follow the instructions: https://supertestnet.github.io/papa-swap/#server_nprofile=nprofile1qyghwumn8ghj7mn0wd68yat99e3k7mgqyq4aepakfametnr580xnk5jfmskdpz6yf95t84xss9gu9sya2pam7tcuj6w
+Click here and follow the instructions: https://supertestnet.github.io/papa-swap/
 
 # How it works
 
